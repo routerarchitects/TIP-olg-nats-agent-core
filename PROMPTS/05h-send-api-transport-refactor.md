@@ -80,7 +80,7 @@ Refactor the current public send/publish implementation so that:
    - nc.FlushWithContext(...)
 
 4. internal/transport no longer imports:
-   - github.com/routerarchitects/nats-agent-core/agentcore
+   - github.com/Telecominfraproject/olg-nats-agent-core/agentcore
 
 5. No import cycles exist.
 

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/routerarchitects/nats-agent-core/internal/runtimeerr"
+	"github.com/Telecominfraproject/olg-nats-agent-core/internal/runtimeerr"
 )
 
 func requireKVRuntimeError(t *testing.T, err error, wantCode runtimeerr.Code, wantOp string, wantMsgPart string) *runtimeerr.Error {

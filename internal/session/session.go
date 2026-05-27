@@ -13,7 +13,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/routerarchitects/nats-agent-core/internal/runtimeerr"
+	"github.com/Telecominfraproject/olg-nats-agent-core/internal/runtimeerr"
 )
 
 var natsConnect = nats.Connect

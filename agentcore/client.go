@@ -8,12 +8,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/routerarchitects/nats-agent-core/internal/kv"
-	"github.com/routerarchitects/nats-agent-core/internal/registry"
-	"github.com/routerarchitects/nats-agent-core/internal/runtimeerr"
-	"github.com/routerarchitects/nats-agent-core/internal/session"
-	"github.com/routerarchitects/nats-agent-core/internal/subjects"
-	"github.com/routerarchitects/nats-agent-core/internal/transport"
+	"github.com/Telecominfraproject/olg-nats-agent-core/internal/kv"
+	"github.com/Telecominfraproject/olg-nats-agent-core/internal/registry"
+	"github.com/Telecominfraproject/olg-nats-agent-core/internal/runtimeerr"
+	"github.com/Telecominfraproject/olg-nats-agent-core/internal/session"
+	"github.com/Telecominfraproject/olg-nats-agent-core/internal/subjects"
+	"github.com/Telecominfraproject/olg-nats-agent-core/internal/transport"
 )
 
 // ConfigureHandler handles configure notifications for a target.

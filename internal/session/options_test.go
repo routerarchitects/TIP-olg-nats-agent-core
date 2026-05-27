@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
-	"github.com/routerarchitects/nats-agent-core/internal/runtimeerr"
+	"github.com/Telecominfraproject/olg-nats-agent-core/internal/runtimeerr"
 )
 
 func requireSessionRuntimeError(t *testing.T, err error, wantCode runtimeerr.Code, wantOp string, wantMsgPart string) *runtimeerr.Error {

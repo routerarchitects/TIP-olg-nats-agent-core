@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/routerarchitects/nats-agent-core/internal/runtimeerr"
+	"github.com/Telecominfraproject/olg-nats-agent-core/internal/runtimeerr"
 )
 
 type sendPublishCall struct {

@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
-	"github.com/routerarchitects/nats-agent-core/agentcore"
+	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
 )
 
 /*

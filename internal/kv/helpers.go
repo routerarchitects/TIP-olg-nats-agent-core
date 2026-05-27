@@ -5,7 +5,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/routerarchitects/nats-agent-core/internal/runtimeerr"
+	"github.com/Telecominfraproject/olg-nats-agent-core/internal/runtimeerr"
 )
 
 func buildDesiredConfigKey(pattern, target string) (string, error) {

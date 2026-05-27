@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
-	"github.com/routerarchitects/nats-agent-core/internal/runtimeerr"
+	"github.com/Telecominfraproject/olg-nats-agent-core/internal/runtimeerr"
 )
 
 // ConnectionProvider resolves the active NATS connection used for publish operations.

@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
-	"github.com/routerarchitects/nats-agent-core/internal/registry"
+	"github.com/Telecominfraproject/olg-nats-agent-core/internal/registry"
 )
 
 // WithQueueGroup sets the optional queue group used by a subscription registration.
