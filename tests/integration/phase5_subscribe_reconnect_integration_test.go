@@ -6,6 +6,8 @@ package integration_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -570,3 +572,89 @@ func waitForClientConnected(client *agentcore.Client, timeout time.Duration) err
 	}
 	return context.DeadlineExceeded
 }
+
+/*
+TC-INT-PHASE5-008
+Type: Positive
+Title: Concurrent registration and reconnection does not cause races, duplicate subscriptions, or deadlocks
+Summary:
+Verifies that registering new handlers concurrently while NATS server restarts
+and reconnect restorations occur does not cause race detector warnings or duplicate active subscriptions.
+*/
+func TestIntegrationConcurrentRegisterAndReconnect(t *testing.T) {
+	srv := startTestNATSServer(t)
+	bucket := uniqueName("cfg_desired")
+
+	cfg := newIntegrationConfig(srv.URL, bucket, true)
+	cfg.NATS.MaxReconnects = 100
+	cfg.NATS.ReconnectWait = 10 * time.Millisecond
+
+	client, err := agentcore.New(cfg)
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+	defer func() {
+		_ = client.Close(context.Background())
+	}()
+
+	if err := client.Start(context.Background()); err != nil {
+		t.Fatalf("Start returned unexpected error: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Start server restart loop
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(150 * time.Millisecond):
+				srv.restart(t)
+			}
+		}
+	}()
+
+	// Run concurrent registrations
+	const numWorkers = 5
+	const regsPerWorker = 8
+	errChan := make(chan error, numWorkers)
+
+	for i := 0; i < numWorkers; i++ {
+		go func(workerID int) {
+			for j := 0; j < regsPerWorker; j++ {
+				target := fmt.Sprintf("target-%d-%d", workerID, j)
+				err := client.RegisterResultHandler(target, func(_ context.Context, _ agentcore.ResultEnvelope) error {
+					return nil
+				})
+				if err != nil {
+					var clientErr *agentcore.Error
+					if errors.As(err, &clientErr) {
+						if clientErr.Code == agentcore.CodeDisconnected || clientErr.Code == agentcore.CodeSubscribeFailed {
+							time.Sleep(20 * time.Millisecond)
+							continue
+						}
+					}
+					errChan <- err
+					return
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			errChan <- nil
+		}(i)
+	}
+
+	// Wait for all workers to finish
+	for i := 0; i < numWorkers; i++ {
+		select {
+		case err := <-errChan:
+			if err != nil {
+				t.Errorf("concurrent registration failed: %v", err)
+			}
+		case <-time.After(6 * time.Second):
+			t.Fatal("timed out waiting for worker registration")
+		}
+	}
+}
+

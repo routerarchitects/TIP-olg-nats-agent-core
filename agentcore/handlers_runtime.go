@@ -34,6 +34,9 @@ func (c *Client) registerConfigureHandler(target string, handler ConfigureHandle
 		return err
 	}
 
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
+
 	snapshot, err := c.subscriptions.Add(registry.AddSpec{
 		Kind:       registry.KindConfigure,
 		Target:     target,
@@ -51,8 +54,8 @@ func (c *Client) registerConfigureHandler(target string, handler ConfigureHandle
 		c.options.metrics.IncSubscribe(string(registry.KindConfigure), subject, "registered")
 	}
 
-	if err := c.activateAfterRegistration(snapshot.ID, "register_configure_handler"); err != nil {
-		c.rollbackRegistration(snapshot.ID, "register_configure_handler_rollback")
+	if err := c.activateAfterRegistrationLocked(snapshot.ID, "register_configure_handler"); err != nil {
+		c.rollbackRegistrationLocked(snapshot.ID, "register_configure_handler_rollback")
 		return err
 	}
 	return nil
@@ -70,6 +73,9 @@ func (c *Client) registerActionHandler(target, action string, handler ActionHand
 	if err != nil {
 		return err
 	}
+
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
 
 	snapshot, err := c.subscriptions.Add(registry.AddSpec{
 		Kind:       registry.KindAction,
@@ -89,8 +95,8 @@ func (c *Client) registerActionHandler(target, action string, handler ActionHand
 		c.options.metrics.IncSubscribe(string(registry.KindAction), subject, "registered")
 	}
 
-	if err := c.activateAfterRegistration(snapshot.ID, "register_action_handler"); err != nil {
-		c.rollbackRegistration(snapshot.ID, "register_action_handler_rollback")
+	if err := c.activateAfterRegistrationLocked(snapshot.ID, "register_action_handler"); err != nil {
+		c.rollbackRegistrationLocked(snapshot.ID, "register_action_handler_rollback")
 		return err
 	}
 	return nil
@@ -109,6 +115,9 @@ func (c *Client) registerResultHandler(target string, handler ResultHandler, opt
 		return err
 	}
 
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
+
 	snapshot, err := c.subscriptions.Add(registry.AddSpec{
 		Kind:       registry.KindResult,
 		Target:     target,
@@ -126,8 +135,8 @@ func (c *Client) registerResultHandler(target string, handler ResultHandler, opt
 		c.options.metrics.IncSubscribe(string(registry.KindResult), subject, "registered")
 	}
 
-	if err := c.activateAfterRegistration(snapshot.ID, "register_result_handler"); err != nil {
-		c.rollbackRegistration(snapshot.ID, "register_result_handler_rollback")
+	if err := c.activateAfterRegistrationLocked(snapshot.ID, "register_result_handler"); err != nil {
+		c.rollbackRegistrationLocked(snapshot.ID, "register_result_handler_rollback")
 		return err
 	}
 	return nil
@@ -146,6 +155,9 @@ func (c *Client) registerStatusHandler(target string, handler StatusHandler, opt
 		return err
 	}
 
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
+
 	snapshot, err := c.subscriptions.Add(registry.AddSpec{
 		Kind:       registry.KindStatus,
 		Target:     target,
@@ -163,31 +175,40 @@ func (c *Client) registerStatusHandler(target string, handler StatusHandler, opt
 		c.options.metrics.IncSubscribe(string(registry.KindStatus), subject, "registered")
 	}
 
-	if err := c.activateAfterRegistration(snapshot.ID, "register_status_handler"); err != nil {
-		c.rollbackRegistration(snapshot.ID, "register_status_handler_rollback")
+	if err := c.activateAfterRegistrationLocked(snapshot.ID, "register_status_handler"); err != nil {
+		c.rollbackRegistrationLocked(snapshot.ID, "register_status_handler_rollback")
 		return err
 	}
 	return nil
 }
 
-func (c *Client) activateAfterRegistration(id, op string) error {
+func (c *Client) activateAfterRegistrationLocked(id, op string) error {
 	state := c.Health().State
 	if state == StateNew || state == StateConnecting {
 		return nil
 	}
 
-	if err := c.activateRegisteredSubscriptionByID(id, false, op); err != nil {
+	if err := c.activateRegisteredSubscriptionByIDLocked(id, false, op); err != nil {
 		return err
 	}
 	c.syncSubscriptionHealth()
 	return nil
 }
 
+func (c *Client) activateAfterRegistration(id, op string) error {
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
+	return c.activateAfterRegistrationLocked(id, op)
+}
+
 func (c *Client) activateAllRegisteredSubscriptions(op string) error {
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
+
 	records := c.subscriptions.ListActivations()
 	var joined error
 	for _, rec := range records {
-		if err := c.activateRecord(rec, false, op); err != nil {
+		if err := c.activateRecordLocked(rec, false, op); err != nil {
 			joined = errors.Join(joined, err)
 		}
 	}
@@ -196,10 +217,13 @@ func (c *Client) activateAllRegisteredSubscriptions(op string) error {
 }
 
 func (c *Client) restoreAllRegisteredSubscriptions() error {
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
+
 	records := c.subscriptions.RestoreRecords()
 	var joined error
 	for _, rec := range records {
-		if err := c.activateRecord(rec, true, "restore_subscriptions"); err != nil {
+		if err := c.activateRecordLocked(rec, true, "restore_subscriptions"); err != nil {
 			joined = errors.Join(joined, err)
 		}
 	}
@@ -207,18 +231,21 @@ func (c *Client) restoreAllRegisteredSubscriptions() error {
 	return joined
 }
 
-func (c *Client) activateRegisteredSubscriptionByID(id string, force bool, op string) error {
-	rec, ok := c.activationRecordByID(id, force)
+func (c *Client) activateRegisteredSubscriptionByIDLocked(id string, force bool, op string) error {
+	rec, ok := c.activationRecordByIDLocked(id, force)
 	if !ok {
 		return nil
 	}
-	return c.activateRecord(rec, force, op)
+	return c.activateRecordLocked(rec, force, op)
 }
 
-func (c *Client) activationRecordByID(id string, force bool) (registry.ActivationRecord, bool) {
+func (c *Client) activateRegisteredSubscriptionByID(id string, force bool, op string) error {
 	c.subMu.Lock()
 	defer c.subMu.Unlock()
+	return c.activateRegisteredSubscriptionByIDLocked(id, force, op)
+}
 
+func (c *Client) activationRecordByIDLocked(id string, force bool) (registry.ActivationRecord, bool) {
 	rec, ok := c.subscriptions.GetActivationRecord(id)
 	if !ok {
 		return registry.ActivationRecord{}, false
@@ -229,7 +256,13 @@ func (c *Client) activationRecordByID(id string, force bool) (registry.Activatio
 	return rec, true
 }
 
-func (c *Client) activateRecord(rec registry.ActivationRecord, force bool, op string) error {
+func (c *Client) activationRecordByID(id string, force bool) (registry.ActivationRecord, bool) {
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
+	return c.activationRecordByIDLocked(id, force)
+}
+
+func (c *Client) activateRecordLocked(rec registry.ActivationRecord, force bool, op string) error {
 	if rec.Active && !force {
 		return nil
 	}
@@ -240,9 +273,7 @@ func (c *Client) activateRecord(rec registry.ActivationRecord, force bool, op st
 
 	sub, err := c.createSubscriptionForRecord(rec, op)
 	if err != nil {
-		c.subMu.Lock()
 		c.subscriptions.MarkInactive(rec.ID, err)
-		c.subMu.Unlock()
 
 		c.logError("subscription activation failed", "operation", op, "registration_id", rec.ID, "subject", rec.Subject, "kind", string(rec.Kind), "error", err)
 		if c.options.metrics != nil {
@@ -252,12 +283,10 @@ func (c *Client) activateRecord(rec registry.ActivationRecord, force bool, op st
 	}
 
 	var staleSub *nats.Subscription
-	c.subMu.Lock()
 	_, exists := c.subscriptions.GetActivationRecord(rec.ID)
 	if exists {
 		staleSub = c.subscriptions.MarkActive(rec.ID, sub)
 	}
-	c.subMu.Unlock()
 	if staleSub != nil {
 		if err := staleSub.Unsubscribe(); err != nil {
 			c.logWarn("failed to unsubscribe stale subscription after override", "operation", op, "registration_id", rec.ID, "subject", rec.Subject, "error", err)
@@ -276,6 +305,12 @@ func (c *Client) activateRecord(rec registry.ActivationRecord, force bool, op st
 		c.options.metrics.IncSubscribe(string(rec.Kind), rec.Subject, "success")
 	}
 	return nil
+}
+
+func (c *Client) activateRecord(rec registry.ActivationRecord, force bool, op string) error {
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
+	return c.activateRecordLocked(rec, force, op)
 }
 
 func (c *Client) createSubscriptionForRecord(rec registry.ActivationRecord, op string) (*nats.Subscription, error) {
@@ -336,11 +371,8 @@ func (c *Client) deactivateAllSubscriptions(op string) error {
 	return joined
 }
 
-func (c *Client) rollbackRegistration(id, op string) {
-	c.subMu.Lock()
+func (c *Client) rollbackRegistrationLocked(id, op string) {
 	handle, removed := c.subscriptions.Remove(id)
-	c.subMu.Unlock()
-
 	if !removed {
 		c.syncSubscriptionHealth()
 		return
@@ -356,6 +388,12 @@ func (c *Client) rollbackRegistration(id, op string) {
 	}
 
 	c.syncSubscriptionHealth()
+}
+
+func (c *Client) rollbackRegistration(id, op string) {
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
+	c.rollbackRegistrationLocked(id, op)
 }
 
 func (c *Client) onSessionReconnected() {
