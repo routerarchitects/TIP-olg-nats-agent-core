@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nats-io/nats.go"
 	"github.com/Telecominfraproject/olg-nats-agent-core/internal/runtimeerr"
+	"github.com/nats-io/nats.go"
 )
 
 func requireRegistryRuntimeError(t *testing.T, err error, wantCode runtimeerr.Code, wantOp string, wantMsgPart string) *runtimeerr.Error {
@@ -369,4 +369,3 @@ func TestMarkActiveReturnsStaleSubscription(t *testing.T) {
 		t.Fatalf("expected stale subscription to be sub2 when marking nil, got %v", stale)
 	}
 }
-

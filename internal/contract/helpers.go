@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-    "github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
+	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
 )
 
 func validationError(op, msg string) error {

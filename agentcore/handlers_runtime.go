@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nats-io/nats.go"
 	"github.com/Telecominfraproject/olg-nats-agent-core/internal/registry"
+	"github.com/nats-io/nats.go"
 )
 
 // WithQueueGroup sets the optional queue group used by a subscription registration.
@@ -409,6 +409,16 @@ func (c *Client) onSessionReconnected() {
 		return
 	}
 	c.logInfo("subscription restore completed")
+
+	c.logInfo("restoring active KV watches after reconnect")
+	if err := c.restoreAllActiveWatches(); err != nil {
+		c.logError("KV watches restore failed", "error", err)
+		if c.options.errorSink != nil {
+			c.options.errorSink(err)
+		}
+		return
+	}
+	c.logInfo("KV watches restore completed")
 }
 
 func (c *Client) onSessionClosed() {

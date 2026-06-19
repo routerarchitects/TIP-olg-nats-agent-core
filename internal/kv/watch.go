@@ -50,18 +50,38 @@ func (s *Store) WatchDesiredConfig(ctx context.Context, target string, handler W
 	if err := waitForWatchReady(ctx, s.runtime.KVTimeout(), ready, done); err != nil {
 		cancelWatch()
 		_ = watcher.Stop()
-		<-done
+		shutdownTimeout := s.runtime.ShutdownTimeout()
+		if shutdownTimeout <= 0 {
+			shutdownTimeout = 2 * time.Second
+		}
+		select {
+		case <-done:
+		case <-time.After(shutdownTimeout):
+			s.reportAsync(kvReadError("watch_desired_config_ready_timeout", "desired-config watch ready cleanup timed out", nil))
+		}
 		return nil, kvReadError("watch_desired_config", "desired-config watch did not become ready", err)
 	}
 
 	var once sync.Once
 	stop := func() error {
+		var stopErr error
 		once.Do(func() {
 			cancelWatch()
 			watcher.Stop()
-			<-done
+
+			shutdownTimeout := s.runtime.ShutdownTimeout()
+			if shutdownTimeout <= 0 {
+				shutdownTimeout = 2 * time.Second
+			}
+
+			select {
+			case <-done:
+			case <-time.After(shutdownTimeout):
+				stopErr = kvReadError("watch_desired_config_stop_timeout", "desired-config watch stop timed out waiting for handler cleanup", nil)
+				s.reportAsync(stopErr)
+			}
 		})
-		return nil
+		return stopErr
 	}
 
 	return stop, nil
@@ -99,6 +119,9 @@ func (s *Store) consumeWatch(ctx context.Context, watcher jetstream.KeyWatcher, 
 			return
 		case entry, ok := <-updates:
 			if !ok {
+				if ctx.Err() == nil {
+					s.reportAsync(kvReadError("watch_desired_config_terminated", "desired-config watcher terminated unexpectedly", nil))
+				}
 				return
 			}
 			if entry == nil {

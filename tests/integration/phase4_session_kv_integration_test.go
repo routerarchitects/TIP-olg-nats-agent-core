@@ -394,3 +394,206 @@ func requireClientErrorCode(t *testing.T, err error, want agentcore.Code) *agent
 	}
 	return got
 }
+
+/*
+TC-INT-PHASE4-007
+Type: Positive
+Title: KV watch continues receiving updates after session reconnect
+Summary:
+Verifies that active desired-config watches are automatically restored on session reconnect
+and continue receiving updates.
+*/
+func TestIntegrationWatchDesiredConfigReconnectRestore(t *testing.T) {
+	srv := startTestNATSServer(t)
+	bucket := uniqueName("cfg_desired")
+	target := "vyos"
+
+	cfg := newIntegrationConfig(srv.URL, bucket, true)
+	cfg.NATS.MaxReconnects = 100
+	cfg.NATS.ReconnectWait = 10 * time.Millisecond
+
+	client, err := agentcore.New(cfg)
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+	if err := client.Start(context.Background()); err != nil {
+		t.Fatalf("Start returned unexpected error: %v", err)
+	}
+	defer func() {
+		_ = client.Close(context.Background())
+	}()
+
+	updates := make(chan agentcore.StoredDesiredConfig, 10)
+	stop, err := client.WatchDesiredConfig(context.Background(), target, func(_ context.Context, stored agentcore.StoredDesiredConfig) error {
+		updates <- stored
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WatchDesiredConfig returned unexpected error: %v", err)
+	}
+	defer stop()
+
+	rec1 := agentcore.DesiredConfigRecord{
+		Version:   "1.0",
+		RPCID:     "rpc-restore-1",
+		Target:    target,
+		UUID:      "cfg-restore-1",
+		Payload:   json.RawMessage(`{"val":1}`),
+		Timestamp: time.Now().UTC(),
+	}
+	_, err = client.StoreDesiredConfig(context.Background(), rec1)
+	if err != nil {
+		t.Fatalf("StoreDesiredConfig(rec1) failed: %v", err)
+	}
+
+	select {
+	case got := <-updates:
+		if got.Record.UUID != rec1.UUID {
+			t.Fatalf("expected uuid %q, got %q", rec1.UUID, got.Record.UUID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for update 1")
+	}
+
+	// Restart NATS server to trigger disconnect and reconnect
+	srv.restart(t)
+
+	if err := waitForClientKVConnected(client, 10*time.Second); err != nil {
+		t.Fatalf("client did not reconnect: %v", err)
+	}
+
+	// Since the watch was restored, NATS JetStream KV Watch will re-deliver the latest value
+	// currently stored in the KV bucket (which is rec1).
+	select {
+	case got := <-updates:
+		if got.Record.UUID != rec1.UUID {
+			t.Fatalf("expected re-delivered uuid %q on watch restore, got %q", rec1.UUID, got.Record.UUID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for re-delivered update 1 after reconnect")
+	}
+
+	// Store second config to verify watch continues working
+	rec2 := agentcore.DesiredConfigRecord{
+		Version:   "1.0",
+		RPCID:     "rpc-restore-2",
+		Target:    target,
+		UUID:      "cfg-restore-2",
+		Payload:   json.RawMessage(`{"val":2}`),
+		Timestamp: time.Now().UTC(),
+	}
+	_, err = client.StoreDesiredConfig(context.Background(), rec2)
+	if err != nil {
+		t.Fatalf("StoreDesiredConfig(rec2) failed: %v", err)
+	}
+
+	select {
+	case got := <-updates:
+		if got.Record.UUID != rec2.UUID {
+			t.Fatalf("expected uuid %q, got %q", rec2.UUID, got.Record.UUID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for update 2 after reconnect")
+	}
+}
+
+/*
+TC-INT-PHASE4-008
+Type: Positive
+Title: KV Watch Stop exits cleanly with timeout and does not block indefinitely on slow handlers
+*/
+func TestIntegrationWatchDesiredConfigStopTimeout(t *testing.T) {
+	srv := startTestNATSServer(t)
+	bucket := uniqueName("cfg_desired")
+	target := "vyos"
+
+	cfg := newIntegrationConfig(srv.URL, bucket, true)
+	cfg.Timeouts.KVTimeout = 500 * time.Millisecond
+	cfg.Timeouts.ShutdownTimeout = 500 * time.Millisecond
+
+	errSinkChan := make(chan error, 10)
+	client, err := agentcore.New(cfg, agentcore.WithErrorSink(func(e error) {
+		errSinkChan <- e
+	}))
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+	if err := client.Start(context.Background()); err != nil {
+		t.Fatalf("Start returned unexpected error: %v", err)
+	}
+	defer func() {
+		_ = client.Close(context.Background())
+	}()
+
+	started := make(chan struct{})
+	handlerDone := make(chan struct{})
+	stop, err := client.WatchDesiredConfig(context.Background(), target, func(ctx context.Context, _ agentcore.StoredDesiredConfig) error {
+		close(started)
+		time.Sleep(3 * time.Second)
+		close(handlerDone)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WatchDesiredConfig returned unexpected error: %v", err)
+	}
+
+	rec := agentcore.DesiredConfigRecord{
+		Version:   "1.0",
+		RPCID:     "rpc-slow-1",
+		Target:    target,
+		UUID:      "cfg-slow-1",
+		Payload:   json.RawMessage(`{"val":1}`),
+		Timestamp: time.Now().UTC(),
+	}
+	_, err = client.StoreDesiredConfig(context.Background(), rec)
+	if err != nil {
+		t.Fatalf("StoreDesiredConfig failed: %v", err)
+	}
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for watch handler to start")
+	}
+
+	stopStarted := time.Now()
+	stopErr := stop()
+	stopDuration := time.Since(stopStarted)
+
+	if stopDuration >= 2*time.Second {
+		t.Fatalf("stop took %v, expected it to timeout and exit in ~500ms", stopDuration)
+	}
+
+	if stopErr == nil {
+		t.Fatal("expected stop to return timeout error, got nil")
+	}
+
+	select {
+	case reportedErr := <-errSinkChan:
+		var clientErr *agentcore.Error
+		if !errors.As(reportedErr, &clientErr) || clientErr.Code != agentcore.CodeKVReadFailed {
+			t.Fatalf("unexpected error in sink: %v", reportedErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected timeout error to be reported to sink")
+	}
+
+	select {
+	case <-handlerDone:
+	case <-time.After(4 * time.Second):
+		t.Fatal("timed out waiting for slow handler to finish")
+	}
+}
+
+func waitForClientKVConnected(client *agentcore.Client, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		health := client.Health()
+		if health.State == agentcore.StateConnected && health.KVReady {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return context.DeadlineExceeded
+}
+

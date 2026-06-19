@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go"
 	"github.com/Telecominfraproject/olg-nats-agent-core/internal/registry"
+	"github.com/nats-io/nats.go"
 )
 
 /*

@@ -87,6 +87,13 @@ func WithErrorSink(fn func(error)) Option {
 	}
 }
 
+type activeWatch struct {
+	id      uint64
+	target  string
+	handler DesiredConfigWatchHandler
+	stopFn  StopFunc
+}
+
 // Client is the public facade used by agent processes.
 type Client struct {
 	mu      sync.RWMutex
@@ -103,8 +110,9 @@ type Client struct {
 	handlerCtx    context.Context
 	handlerCancel context.CancelFunc
 
-	nextWatchID uint64
-	watches     map[uint64]StopFunc
+	nextWatchID   uint64
+	watchMu       sync.Mutex
+	activeWatches map[uint64]*activeWatch
 
 	callbacksEnabled atomic.Bool
 
@@ -129,6 +137,13 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 		}
 		if err := opt(&options); err != nil {
 			return nil, err
+		}
+	}
+
+	if options.errorSink != nil {
+		origSink := options.errorSink
+		options.errorSink = func(err error) {
+			origSink(toPublicError(err))
 		}
 	}
 
@@ -187,7 +202,7 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 		subscriptions: registry.New(),
 		subjects:      subjectBuilder,
 		publisher:     publisher,
-		watches:       make(map[uint64]StopFunc),
+		activeWatches: make(map[uint64]*activeWatch),
 	}
 	client.syncSubscriptionHealth()
 	runtime.SetReconnectHandler(client.onSessionReconnected)
@@ -545,28 +560,68 @@ func (c *Client) WatchDesiredConfig(ctx context.Context, target string, handler 
 		}
 	}
 
-	stop, err := c.kv.WatchDesiredConfig(ctx, target, func(watchCtx context.Context, stored kv.StoredDesiredConfig) error {
-		return handler(watchCtx, StoredDesiredConfig{
-			Record: DesiredConfigRecord{
-				Version:   stored.Record.Version,
-				RPCID:     stored.Record.RPCID,
-				Target:    stored.Record.Target,
-				UUID:      stored.Record.UUID,
-				Payload:   json.RawMessage(stored.Record.Payload),
-				Timestamp: stored.Record.Timestamp,
-			},
-			Bucket:    stored.Bucket,
-			Key:       stored.Key,
-			Revision:  stored.Revision,
-			CreatedAt: stored.CreatedAt,
+	c.watchMu.Lock()
+	id := c.nextWatchID + 1
+	c.nextWatchID = id
+
+	intent := &activeWatch{
+		id:      id,
+		target:  target,
+		handler: handler,
+	}
+	c.activeWatches[id] = intent
+	c.watchMu.Unlock()
+
+	buildWatch := func() (StopFunc, error) {
+		stop, err := c.kv.WatchDesiredConfig(ctx, target, func(watchCtx context.Context, stored kv.StoredDesiredConfig) error {
+			return handler(watchCtx, StoredDesiredConfig{
+				Record: DesiredConfigRecord{
+					Version:   stored.Record.Version,
+					RPCID:     stored.Record.RPCID,
+					Target:    stored.Record.Target,
+					UUID:      stored.Record.UUID,
+					Payload:   json.RawMessage(stored.Record.Payload),
+					Timestamp: stored.Record.Timestamp,
+				},
+				Bucket:    stored.Bucket,
+				Key:       stored.Key,
+				Revision:  stored.Revision,
+				CreatedAt: stored.CreatedAt,
+			})
 		})
-	})
+		if err != nil {
+			return nil, err
+		}
+		return StopFunc(stop), nil
+	}
+
+	stop, err := buildWatch()
 	if err != nil {
+		c.watchMu.Lock()
+		delete(c.activeWatches, id)
+		c.watchMu.Unlock()
 		return nil, toPublicError(err)
 	}
-	return c.trackWatch(func() error {
-		return stop()
-	}), nil
+
+	c.watchMu.Lock()
+	intent.stopFn = stop
+	c.watchMu.Unlock()
+
+	var once sync.Once
+	return func() error {
+		var stopErr error
+		once.Do(func() {
+			c.watchMu.Lock()
+			current := c.activeWatches[id]
+			delete(c.activeWatches, id)
+			c.watchMu.Unlock()
+
+			if current != nil && current.stopFn != nil {
+				stopErr = current.stopFn()
+			}
+		})
+		return stopErr
+	}, nil
 }
 
 // StartupReconcile loads latest desired state during recovery.
@@ -594,38 +649,57 @@ func (c *Client) RegisterStatusHandler(target string, handler StatusHandler, opt
 	return c.registerStatusHandler(target, handler, opts...)
 }
 
-func (c *Client) trackWatch(stop StopFunc) StopFunc {
-	id := atomic.AddUint64(&c.nextWatchID, 1)
+func (c *Client) restoreAllActiveWatches() error {
+	c.watchMu.Lock()
+	defer c.watchMu.Unlock()
 
-	c.mu.Lock()
-	c.watches[id] = stop
-	c.mu.Unlock()
+	var joined error
+	for _, intent := range c.activeWatches {
+		c.logInfo("restoring KV watch", "target", intent.target)
+		if intent.stopFn != nil {
+			_ = intent.stopFn()
+		}
 
-	var once sync.Once
-	return func() error {
-		var stopErr error
-		once.Do(func() {
-			c.mu.Lock()
-			stored := c.watches[id]
-			delete(c.watches, id)
-			c.mu.Unlock()
-			if stored != nil {
-				stopErr = stored()
-			}
+		handler := intent.handler
+		stop, err := c.kv.WatchDesiredConfig(context.Background(), intent.target, func(watchCtx context.Context, stored kv.StoredDesiredConfig) error {
+			return handler(watchCtx, StoredDesiredConfig{
+				Record: DesiredConfigRecord{
+					Version:   stored.Record.Version,
+					RPCID:     stored.Record.RPCID,
+					Target:    stored.Record.Target,
+					UUID:      stored.Record.UUID,
+					Payload:   json.RawMessage(stored.Record.Payload),
+					Timestamp: stored.Record.Timestamp,
+				},
+				Bucket:    stored.Bucket,
+				Key:       stored.Key,
+				Revision:  stored.Revision,
+				CreatedAt: stored.CreatedAt,
+			})
 		})
-		return stopErr
+		if err != nil {
+			joined = errors.Join(joined, err)
+			c.logError("failed to restore KV watch", "target", intent.target, "error", err)
+			if c.options.errorSink != nil {
+				c.options.errorSink(err)
+			}
+			continue
+		}
+		intent.stopFn = StopFunc(stop)
 	}
+	return joined
 }
 
 func (c *Client) stopAllWatches() error {
-	c.mu.Lock()
-	stops := make([]StopFunc, 0, len(c.watches))
-	for id, stop := range c.watches {
-		_ = id
-		stops = append(stops, stop)
+	c.watchMu.Lock()
+	stops := make([]StopFunc, 0, len(c.activeWatches))
+	for _, w := range c.activeWatches {
+		if w.stopFn != nil {
+			stops = append(stops, w.stopFn)
+		}
 	}
-	c.watches = make(map[uint64]StopFunc)
-	c.mu.Unlock()
+	c.activeWatches = make(map[uint64]*activeWatch)
+	c.watchMu.Unlock()
 
 	var joined error
 	for _, stop := range stops {

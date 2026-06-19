@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Telecominfraproject/olg-nats-agent-core/internal/runtimeerr"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/Telecominfraproject/olg-nats-agent-core/internal/runtimeerr"
 )
 
 type stubRuntimeProvider struct {
@@ -49,6 +49,10 @@ func (s *stubRuntimeProvider) KVTimeout() time.Duration {
 	if s.kvTimeout > 0 {
 		return s.kvTimeout
 	}
+	return 200 * time.Millisecond
+}
+
+func (s *stubRuntimeProvider) ShutdownTimeout() time.Duration {
 	return 200 * time.Millisecond
 }
 

@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Telecominfraproject/olg-nats-agent-core/internal/runtimeerr"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/Telecominfraproject/olg-nats-agent-core/internal/runtimeerr"
 )
 
 var natsConnect = nats.Connect
@@ -86,6 +86,13 @@ func (m *Manager) KVTimeout() time.Duration {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.effective.Config.Timeouts.KVTimeout
+}
+
+// ShutdownTimeout returns the configured shutdown timeout.
+func (m *Manager) ShutdownTimeout() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.effective.Config.Timeouts.ShutdownTimeout
 }
 
 // SubscribeTimeout returns the configured timeout for subscribe operations.

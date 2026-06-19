@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go"
 	"github.com/Telecominfraproject/olg-nats-agent-core/internal/runtimeerr"
+	"github.com/nats-io/nats.go"
 )
 
 type stubConnectionProvider struct {

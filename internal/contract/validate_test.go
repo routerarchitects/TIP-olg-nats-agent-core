@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-    "github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
+	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
 )
 
 /*

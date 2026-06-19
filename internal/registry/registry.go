@@ -6,8 +6,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/nats-io/nats.go"
 	"github.com/Telecominfraproject/olg-nats-agent-core/internal/runtimeerr"
+	"github.com/nats-io/nats.go"
 )
 
 // Registry stores subscription intent and runtime activation state.

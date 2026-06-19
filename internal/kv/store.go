@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Telecominfraproject/olg-nats-agent-core/internal/runtimeerr"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/Telecominfraproject/olg-nats-agent-core/internal/runtimeerr"
 )
 
 // RuntimeProvider exposes session runtime handles required by KV operations.
@@ -18,6 +18,7 @@ type RuntimeProvider interface {
 	DesiredConfigBucket() string
 	DesiredConfigKeyPattern() string
 	KVTimeout() time.Duration
+	ShutdownTimeout() time.Duration
 }
 
 // DesiredConfigRecord is the desired-state payload stored in KV.
