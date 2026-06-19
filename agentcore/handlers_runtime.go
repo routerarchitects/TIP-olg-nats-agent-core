@@ -251,12 +251,21 @@ func (c *Client) activateRecord(rec registry.ActivationRecord, force bool, op st
 		return err
 	}
 
+	var staleSub *nats.Subscription
 	c.subMu.Lock()
 	_, exists := c.subscriptions.GetActivationRecord(rec.ID)
 	if exists {
-		c.subscriptions.MarkActive(rec.ID, sub)
+		staleSub = c.subscriptions.MarkActive(rec.ID, sub)
 	}
 	c.subMu.Unlock()
+	if staleSub != nil {
+		if err := staleSub.Unsubscribe(); err != nil {
+			c.logWarn("failed to unsubscribe stale subscription after override", "operation", op, "registration_id", rec.ID, "subject", rec.Subject, "error", err)
+			if c.options.errorSink != nil {
+				c.options.errorSink(err)
+			}
+		}
+	}
 	if !exists {
 		c.cleanupSubscription(sub, op, rec.ID, rec.Subject, "failed to cleanup active subscription after registration was removed during activation")
 		return nil

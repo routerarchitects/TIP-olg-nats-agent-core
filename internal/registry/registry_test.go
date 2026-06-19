@@ -318,3 +318,55 @@ func TestRemoveDeletesIntentAndDetachesActiveHandle(t *testing.T) {
 		t.Fatalf("expected re-add to succeed after remove, got %v", err)
 	}
 }
+
+/*
+TC-REGISTRY-007
+Type: Positive
+Title: MarkActive returns stale subscription on re-activation or replacement
+Summary:
+Verifies that when MarkActive is called with a new/nil subscription and replaces an
+existing active subscription, the replaced active subscription is returned as stale.
+
+Validates:
+  - MarkActive with a new subscription returns nil if no previous active subscription exists
+  - MarkActive with a new subscription returns the old subscription if an active subscription exists and is replaced
+  - MarkActive with same subscription returns nil
+  - MarkActive with nil subscription returns the old subscription if an active subscription exists
+*/
+func TestMarkActiveReturnsStaleSubscription(t *testing.T) {
+	r := New()
+	snap, err := r.Add(AddSpec{
+		Kind:     KindResult,
+		Target:   "vyos",
+		Subject:  "result.vyos",
+		Callback: func(*nats.Msg) {},
+	})
+	if err != nil {
+		t.Fatalf("expected nil add error, got %v", err)
+	}
+
+	sub1 := &nats.Subscription{}
+	stale := r.MarkActive(snap.ID, sub1)
+	if stale != nil {
+		t.Fatalf("expected nil stale subscription when transitioning from inactive, got %v", stale)
+	}
+
+	sub2 := &nats.Subscription{}
+	stale = r.MarkActive(snap.ID, sub2)
+	if stale != sub1 {
+		t.Fatalf("expected stale subscription to be sub1, got %v", stale)
+	}
+
+	// MarkActive with same subscription should not return it as stale
+	stale = r.MarkActive(snap.ID, sub2)
+	if stale != nil {
+		t.Fatalf("expected nil stale subscription when mark active with the same active subscription, got %v", stale)
+	}
+
+	// MarkActive with nil should return sub2
+	stale = r.MarkActive(snap.ID, nil)
+	if stale != sub2 {
+		t.Fatalf("expected stale subscription to be sub2 when marking nil, got %v", stale)
+	}
+}
+

@@ -90,22 +90,32 @@ func (r *Registry) ListActivations() []ActivationRecord {
 }
 
 // MarkActive stores the active runtime handle after successful subscription.
-func (r *Registry) MarkActive(id string, sub *nats.Subscription) {
+// It returns any stale subscription that was replaced and needs to be unsubscribed.
+func (r *Registry) MarkActive(id string, sub *nats.Subscription) *nats.Subscription {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	e, ok := r.entries[id]
 	if !ok {
-		return
+		return nil
 	}
+
+	var stale *nats.Subscription
 	if sub == nil {
+		stale = e.ActiveSub
 		e.ActiveSub = nil
 		e.Active = false
-		return
+		return stale
 	}
+
+	if e.ActiveSub != nil && e.ActiveSub != sub {
+		stale = e.ActiveSub
+	}
+
 	e.ActiveSub = sub
-	e.Active = e.ActiveSub != nil
+	e.Active = true
 	e.LastActivationErr = ""
+	return stale
 }
 
 // MarkInactive marks a registration inactive and stores the latest activation error.
