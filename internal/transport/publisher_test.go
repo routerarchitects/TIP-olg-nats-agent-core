@@ -92,7 +92,7 @@ Validates:
   - error op is new_publisher
 */
 func TestNewPublisherRejectsNilConnectionProvider(t *testing.T) {
-	pub, err := NewPublisher(nil, nil, nil, nil, nil)
+	pub, err := NewPublisher(nil, nil, nil, nil, nil, nil)
 	if pub != nil {
 		t.Fatalf("expected nil publisher, got %#v", pub)
 	}
@@ -115,7 +115,7 @@ Validates:
   - all failures use runtime validation errors
 */
 func TestPublishRejectsInvalidInput(t *testing.T) {
-	pub, err := NewPublisher(&stubConnectionProvider{nc: &nats.Conn{}}, nil, nil, nil, nil)
+	pub, err := NewPublisher(&stubConnectionProvider{nc: &nats.Conn{}}, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("expected nil constructor error, got %v", err)
 	}
@@ -157,7 +157,7 @@ func TestPublishPropagatesConnectionError(t *testing.T) {
 		Message:   "runtime disconnected",
 		Retryable: true,
 	}
-	pub, err := NewPublisher(&stubConnectionProvider{err: cause}, nil, nil, nil, nil)
+	pub, err := NewPublisher(&stubConnectionProvider{err: cause}, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("expected nil constructor error, got %v", err)
 	}
@@ -184,7 +184,7 @@ Validates:
 */
 func TestPublishWrapsPublishAndFlushFailures(t *testing.T) {
 	metrics := &stubPublishMetrics{}
-	pub, err := NewPublisher(&stubConnectionProvider{nc: &nats.Conn{}}, nil, nil, nil, metrics)
+	pub, err := NewPublisher(&stubConnectionProvider{nc: &nats.Conn{}}, nil, nil, nil, nil, metrics)
 	if err != nil {
 		t.Fatalf("expected nil constructor error, got %v", err)
 	}
@@ -233,7 +233,7 @@ Validates:
 */
 func TestPublishSuccessReportsMetricsAndLatency(t *testing.T) {
 	metrics := &stubPublishMetrics{}
-	pub, err := NewPublisher(&stubConnectionProvider{nc: &nats.Conn{}}, nil, nil, nil, metrics)
+	pub, err := NewPublisher(&stubConnectionProvider{nc: &nats.Conn{}}, nil, nil, nil, nil, metrics)
 	if err != nil {
 		t.Fatalf("expected nil constructor error, got %v", err)
 	}
@@ -270,7 +270,7 @@ Validates:
   - flush context receives a deadline from configured publish timeout
 */
 func TestPublishUsesTimeoutWhenContextHasNoDeadline(t *testing.T) {
-	pub, err := NewPublisher(&stubConnectionProvider{nc: &nats.Conn{}}, func() time.Duration { return 200 * time.Millisecond }, nil, nil, nil)
+	pub, err := NewPublisher(&stubConnectionProvider{nc: &nats.Conn{}}, func() time.Duration { return 200 * time.Millisecond }, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("expected nil constructor error, got %v", err)
 	}
@@ -341,6 +341,7 @@ func TestPublishSuccessOnFirstTry(t *testing.T) {
 		nil,
 		func() int { return attempts },
 		func() time.Duration { return backoff },
+		nil,
 		metrics,
 	)
 	if err != nil {
@@ -384,6 +385,7 @@ func TestPublishRetryAndSucceed(t *testing.T) {
 		nil,
 		func() int { return attempts },
 		func() time.Duration { return backoff },
+		nil,
 		metrics,
 	)
 	if err != nil {
@@ -431,6 +433,7 @@ func TestPublishRetryExhausted(t *testing.T) {
 		nil,
 		func() int { return attempts },
 		func() time.Duration { return backoff },
+		nil,
 		metrics,
 	)
 	if err != nil {
@@ -476,6 +479,7 @@ func TestPublishContextCancellation(t *testing.T) {
 		nil,
 		func() int { return attempts },
 		func() time.Duration { return backoff },
+		nil,
 		metrics,
 	)
 	if err != nil {
@@ -510,5 +514,57 @@ func TestPublishContextCancellation(t *testing.T) {
 	// Verify that it only attempted once before aborting
 	if publishCalls != 1 {
 		t.Fatalf("expected only 1 publish call before cancellation, got %d", publishCalls)
+	}
+}
+
+/*
+TC-TRANSPORT-PUBLISHER-012
+Type: Negative
+Title: Publish does not retry on non-retryable flush failure
+Summary:
+Verifies that Publish aborts its retry loop immediately without retrying
+when a non-retryable error (such as a flush failure) is encountered.
+
+Validates:
+  - publish fails and returns CodePublishFailed
+  - returned error has Retryable set to false
+  - publish function is executed exactly once
+*/
+func TestPublishNoRetryOnFlushFailure(t *testing.T) {
+	metrics := &stubPublishMetrics{}
+	attempts := 3
+	backoff := 10 * time.Millisecond
+	pub, err := NewPublisher(
+		&stubConnectionProvider{nc: &nats.Conn{}},
+		nil,
+		func() int { return attempts },
+		func() time.Duration { return backoff },
+		nil,
+		metrics,
+	)
+	if err != nil {
+		t.Fatalf("expected nil constructor error, got %v", err)
+	}
+
+	publishCalls := 0
+	pub.publishFn = func(*nats.Conn, string, []byte) error {
+		publishCalls++
+		return nil
+	}
+	flushCause := errors.New("flush failed")
+	pub.flushFn = func(*nats.Conn, context.Context) error {
+		return flushCause
+	}
+
+	err = pub.Publish(context.Background(), "publish_status", "status", "status.vyos", []byte(`{"ok":true}`))
+	got := requireRuntimeError(t, err, runtimeerr.CodePublishFailed, "publish_status", "flush failed")
+	if got.Retryable {
+		t.Fatal("expected non-retryable error, got Retryable: true")
+	}
+	if !errors.Is(got, flushCause) {
+		t.Fatalf("expected wrapped cause %v, got %v", flushCause, got)
+	}
+	if publishCalls != 1 {
+		t.Fatalf("expected exactly 1 publish call due to immediate abort, got %d", publishCalls)
 	}
 }

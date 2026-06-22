@@ -195,6 +195,7 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 		func() time.Duration {
 			return runtime.EffectiveConfig().Retry.PublishBackoff
 		},
+		options.logger,
 		options.metrics,
 	)
 	if err != nil {

@@ -2,7 +2,7 @@ package transport
 
 import (
 	"context"
-	"log"
+	"errors"
 	"strings"
 	"time"
 
@@ -21,12 +21,18 @@ type PublishMetrics interface {
 	ObservePublishLatency(kind, subject string, d time.Duration)
 }
 
+// Logger is the optional transport-layer logging hook.
+type Logger interface {
+	Warn(msg string, kv ...any)
+}
+
 // Publisher owns low-level publish and flush mechanics.
 type Publisher struct {
 	conn           ConnectionProvider
 	publishTimeout func() time.Duration
 	attempts       func() int
 	backoff        func() time.Duration
+	logger         Logger
 	metrics        PublishMetrics
 	publishFn      func(*nats.Conn, string, []byte) error
 	flushFn        func(*nats.Conn, context.Context) error
@@ -38,6 +44,7 @@ func NewPublisher(
 	publishTimeout func() time.Duration,
 	attempts func() int,
 	backoff func() time.Duration,
+	logger Logger,
 	metrics PublishMetrics,
 ) (*Publisher, error) {
 	if conn == nil {
@@ -63,6 +70,7 @@ func NewPublisher(
 		publishTimeout: publishTimeout,
 		attempts:       attempts,
 		backoff:        backoff,
+		logger:         logger,
 		metrics:        metrics,
 		publishFn: func(nc *nats.Conn, subject string, payload []byte) error {
 			return nc.Publish(subject, payload)
@@ -144,7 +152,15 @@ func (p *Publisher) Publish(ctx context.Context, op, kind, subject string, paylo
 		}
 
 		lastErr = err
-		log.Printf("publish attempt %d/%d failed: %v", i+1, attempts, err)
+
+		var runErr *runtimeerr.Error
+		if errors.As(err, &runErr) && !runErr.Retryable {
+			return err
+		}
+
+		if p.logger != nil {
+			p.logger.Warn("publish attempt failed", "attempt", i+1, "attempts", attempts, "error", err)
+		}
 
 		if i < attempts-1 {
 			select {
@@ -168,7 +184,14 @@ func (p *Publisher) Publish(ctx context.Context, op, kind, subject string, paylo
 func (p *Publisher) publishOnce(ctx context.Context, op, kind, subject string, payload []byte) error {
 	nc, err := p.conn.Connection()
 	if err != nil {
-		return err
+		return &runtimeerr.Error{
+			Code:      runtimeerr.CodeDisconnected,
+			Op:        op,
+			Subject:   subject,
+			Message:   "connection not resolved",
+			Retryable: true,
+			Err:       err,
+		}
 	}
 
 	if err := p.publishFn(nc, subject, payload); err != nil {
@@ -193,7 +216,7 @@ func (p *Publisher) publishOnce(ctx context.Context, op, kind, subject string, p
 			Op:        op,
 			Subject:   subject,
 			Message:   "flush failed",
-			Retryable: true,
+			Retryable: false,
 			Err:       err,
 		}
 	}
