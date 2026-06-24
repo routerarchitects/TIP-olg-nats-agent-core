@@ -487,7 +487,6 @@ func (c *Client) onSessionReconnected() {
 		return
 	}
 	c.logInfo("subscription restore completed")
-
 	c.logInfo("restoring active KV watches after reconnect")
 	if err := c.restoreAllActiveWatches(); err != nil {
 		c.logError("KV watches restore failed", "error", err)
@@ -497,6 +496,21 @@ func (c *Client) onSessionReconnected() {
 		return
 	}
 	c.logInfo("KV watches restore completed")
+
+	if c.options.reconnectHandler != nil {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					err := fmt.Errorf("reconnect handler panicked: %v", r)
+					c.logError("reconnect handler panicked", "error", err)
+					if c.options.errorSink != nil {
+						c.options.errorSink(err)
+					}
+				}
+			}()
+			c.options.reconnectHandler()
+		}()
+	}
 }
 
 func (c *Client) onSessionClosed() {

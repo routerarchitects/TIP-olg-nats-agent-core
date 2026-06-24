@@ -43,10 +43,11 @@ type SubscriptionOptions struct {
 }
 
 type clientOptions struct {
-	logger    Logger
-	metrics   Metrics
-	now       func() time.Time
-	errorSink func(error)
+	logger           Logger
+	metrics          Metrics
+	now              func() time.Time
+	errorSink        func(error)
+	reconnectHandler func()
 }
 
 // Option applies an optional public client setting during construction.
@@ -92,6 +93,14 @@ type activeWatch struct {
 	target  string
 	handler DesiredConfigWatchHandler
 	stopFn  StopFunc
+}
+
+// WithReconnectHandler registers a handler to be invoked when the NATS session is reconnected.
+func WithReconnectHandler(handler func()) Option {
+	return func(opts *clientOptions) error {
+		opts.reconnectHandler = handler
+		return nil
+	}
 }
 
 // Client is the public facade used by agent processes.
