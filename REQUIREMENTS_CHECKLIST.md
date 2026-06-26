@@ -343,7 +343,6 @@ Commit note:
 | `agentcore/config.go` | NATS config, timeout/retry defaults, and override points are clear |
 | `agentcore/models.go` | standard envelope types, version field, `rpc_id`, config identity, result/status separation |
 | `agentcore/client.go` | client lifecycle, public API surface, connect/close/health behavior |
-| `internal/contract` | codec, validation, and receive-side correlation support |
 | `internal/subjects` | subject generation and validation |
 | `internal/session` | NATS connection, reconnect handling, lifecycle, and health state |
 | `internal/kv` | desired-config storage, retrieval, watch, and revision info exposure |

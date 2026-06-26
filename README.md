@@ -50,7 +50,6 @@ Phase 6 remains scoped to:
 
 Current code includes:
 - public config, model, error, logger, and metrics types
-- shared contract codec and validation helpers (`internal/contract`)
 - centralized subject generation and validation helpers (`internal/subjects`)
 - runtime session management (`internal/session`)
 - JetStream and Key-Value setup for desired configuration storage

@@ -90,7 +90,6 @@ type TimeoutConfig struct {
 	SubscribeTimeout time.Duration
 	KVTimeout        time.Duration
 	ShutdownTimeout  time.Duration
-	HandlerWarnAfter time.Duration
 }
 
 // RetryConfig defines retry policy knobs for runtime operations.

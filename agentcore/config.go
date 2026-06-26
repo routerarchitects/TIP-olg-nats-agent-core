@@ -13,7 +13,6 @@ type Config struct {
 	KV        KVConfig        `json:"kv"`
 	Timeouts  TimeoutConfig   `json:"timeouts"`
 	Retry     RetryConfig     `json:"retry"`
-	Execution ExecutionConfig `json:"execution"`
 	Observe   ObserveConfig   `json:"observe,omitempty"`
 }
 
@@ -79,18 +78,12 @@ type TimeoutConfig struct {
 	SubscribeTimeout time.Duration `json:"subscribe_timeout,omitempty"`
 	KVTimeout        time.Duration `json:"kv_timeout,omitempty"`
 	ShutdownTimeout  time.Duration `json:"shutdown_timeout,omitempty"`
-	HandlerWarnAfter time.Duration `json:"handler_warn_after,omitempty"`
 }
 
 // RetryConfig defines retry policy knobs for public operations.
 type RetryConfig struct {
 	PublishAttempts int           `json:"publish_attempts,omitempty"`
 	PublishBackoff  time.Duration `json:"publish_backoff,omitempty"`
-}
-
-// ExecutionConfig describes handler execution mode without exposing internals.
-type ExecutionConfig struct {
-	HandlerMode string `json:"handler_mode,omitempty"`
 }
 
 // ObserveConfig allows optional observability hooks to be supplied at config time.

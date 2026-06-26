@@ -838,7 +838,6 @@ func toSessionConfig(cfg Config) session.Config {
 			SubscribeTimeout: cfg.Timeouts.SubscribeTimeout,
 			KVTimeout:        cfg.Timeouts.KVTimeout,
 			ShutdownTimeout:  cfg.Timeouts.ShutdownTimeout,
-			HandlerWarnAfter: cfg.Timeouts.HandlerWarnAfter,
 		},
 		Retry: session.RetryConfig{
 			PublishAttempts: cfg.Retry.PublishAttempts,

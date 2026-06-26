@@ -99,9 +99,6 @@ func TestNormalizeConfigAppliesDefaultsWhenUnset(t *testing.T) {
 	if got.Timeouts.ShutdownTimeout != defaultShutdownTimeout {
 		t.Fatalf("expected ShutdownTimeout %v, got %v", defaultShutdownTimeout, got.Timeouts.ShutdownTimeout)
 	}
-	if got.Timeouts.HandlerWarnAfter != defaultHandlerWarnAfter {
-		t.Fatalf("expected HandlerWarnAfter %v, got %v", defaultHandlerWarnAfter, got.Timeouts.HandlerWarnAfter)
-	}
 	if got.Retry.PublishAttempts != defaultPublishAttempts {
 		t.Fatalf("expected PublishAttempts %d, got %d", defaultPublishAttempts, got.Retry.PublishAttempts)
 	}
@@ -233,7 +230,6 @@ func TestNormalizeConfigRejectsNegativeTimeoutAndRetryValues(t *testing.T) {
 		{name: "negative subscribe timeout", mutate: func(c *Config) { c.Timeouts.SubscribeTimeout = -1 }, msgPart: "timeouts.subscribe_timeout cannot be negative"},
 		{name: "negative kv timeout", mutate: func(c *Config) { c.Timeouts.KVTimeout = -1 }, msgPart: "timeouts.kv_timeout cannot be negative"},
 		{name: "negative shutdown timeout", mutate: func(c *Config) { c.Timeouts.ShutdownTimeout = -1 }, msgPart: "timeouts.shutdown_timeout cannot be negative"},
-		{name: "negative handler warn timeout", mutate: func(c *Config) { c.Timeouts.HandlerWarnAfter = -1 }, msgPart: "timeouts.handler_warn_after cannot be negative"},
 		{name: "negative publish attempts", mutate: func(c *Config) { c.Retry.PublishAttempts = -1 }, msgPart: "retry.publish_attempts cannot be negative"},
 		{name: "negative publish backoff", mutate: func(c *Config) { c.Retry.PublishBackoff = -1 }, msgPart: "retry.publish_backoff cannot be negative"},
 		{name: "negative kv ttl", mutate: func(c *Config) { c.KV.TTL = -1 }, msgPart: "kv.ttl cannot be negative"},

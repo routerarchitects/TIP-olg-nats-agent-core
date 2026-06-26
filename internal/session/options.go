@@ -19,7 +19,6 @@ const (
 	defaultSubscribeTimeout = 5 * time.Second
 	defaultKVTimeout        = 5 * time.Second
 	defaultShutdownTimeout  = 10 * time.Second
-	defaultHandlerWarnAfter = 5 * time.Second
 
 	defaultPublishAttempts = 3
 	defaultPublishBackoff  = 200 * time.Millisecond
@@ -68,9 +67,6 @@ func normalizeConfig(cfg Config) (EffectiveConfig, error) {
 	}
 	if out.Timeouts.ShutdownTimeout < 0 {
 		return EffectiveConfig{}, validationError(op, "timeouts.shutdown_timeout cannot be negative")
-	}
-	if out.Timeouts.HandlerWarnAfter < 0 {
-		return EffectiveConfig{}, validationError(op, "timeouts.handler_warn_after cannot be negative")
 	}
 	if out.Retry.PublishAttempts < 0 {
 		return EffectiveConfig{}, validationError(op, "retry.publish_attempts cannot be negative")
@@ -129,9 +125,6 @@ func normalizeConfig(cfg Config) (EffectiveConfig, error) {
 	}
 	if out.Timeouts.ShutdownTimeout == 0 {
 		out.Timeouts.ShutdownTimeout = defaultShutdownTimeout
-	}
-	if out.Timeouts.HandlerWarnAfter == 0 {
-		out.Timeouts.HandlerWarnAfter = defaultHandlerWarnAfter
 	}
 
 	if out.Retry.PublishAttempts == 0 {

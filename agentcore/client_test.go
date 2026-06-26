@@ -96,14 +96,10 @@ func testConfig() Config {
 			SubscribeTimeout: 1 * time.Second,
 			KVTimeout:        1 * time.Second,
 			ShutdownTimeout:  2 * time.Second,
-			HandlerWarnAfter: 500 * time.Millisecond,
 		},
 		Retry: RetryConfig{
 			PublishAttempts: 3,
 			PublishBackoff:  100 * time.Millisecond,
-		},
-		Execution: ExecutionConfig{
-			HandlerMode: "sync",
 		},
 	}
 }
@@ -256,19 +252,12 @@ func TestNewCreatesClientWithInitialState(t *testing.T) {
 	if gotCfg.Timeouts.ShutdownTimeout != cfg.Timeouts.ShutdownTimeout {
 		t.Fatalf("expected ShutdownTimeout %v, got %v", cfg.Timeouts.ShutdownTimeout, gotCfg.Timeouts.ShutdownTimeout)
 	}
-	if gotCfg.Timeouts.HandlerWarnAfter != cfg.Timeouts.HandlerWarnAfter {
-		t.Fatalf("expected HandlerWarnAfter %v, got %v", cfg.Timeouts.HandlerWarnAfter, gotCfg.Timeouts.HandlerWarnAfter)
-	}
 
 	if gotCfg.Retry.PublishAttempts != cfg.Retry.PublishAttempts {
 		t.Fatalf("expected PublishAttempts %d, got %d", cfg.Retry.PublishAttempts, gotCfg.Retry.PublishAttempts)
 	}
 	if gotCfg.Retry.PublishBackoff != cfg.Retry.PublishBackoff {
 		t.Fatalf("expected PublishBackoff %v, got %v", cfg.Retry.PublishBackoff, gotCfg.Retry.PublishBackoff)
-	}
-
-	if gotCfg.Execution.HandlerMode != cfg.Execution.HandlerMode {
-		t.Fatalf("expected HandlerMode %q, got %q", cfg.Execution.HandlerMode, gotCfg.Execution.HandlerMode)
 	}
 }
 
