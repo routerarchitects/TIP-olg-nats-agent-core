@@ -614,3 +614,93 @@ func TestStartHonorsCancellationDuringConnect(t *testing.T) {
 		t.Fatalf("expected runtime handles to stay nil, got nc=%#v js=%#v kv=%#v", m.nc, m.js, m.kv)
 	}
 }
+
+/*
+TC-SESSION-MANAGER-018
+Type: Positive
+Title: Close context cancellation during in-flight Start leaves runtime closed
+Summary:
+Verifies that Close returns context canceled error under caller cancellation but
+leaves closeRequested and closing flags set so Start aborts, cleans flags, and
+transitions manager state to StateClosed.
+Validates:
+  - Close returns canceled context error
+  - closeRequested and closing flags remain true
+  - Start aborts, cleans flags, and transitions state to closed
+*/
+func TestCloseContextCancellationDuringInFlightStartLeavesRuntimeClosed(t *testing.T) {
+	originalConnect := natsConnect
+	t.Cleanup(func() {
+		natsConnect = originalConnect
+	})
+
+	connectEntered := make(chan struct{})
+	releaseConnect := make(chan struct{})
+	natsConnect = func(_ string, _ ...nats.Option) (*nats.Conn, error) {
+		close(connectEntered)
+		<-releaseConnect
+		return nil, errors.New("connect failed after close request")
+	}
+
+	m, err := NewManager(testSessionConfig(), Hooks{})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	startDone := make(chan error, 1)
+	go func() {
+		startDone <- m.Start(context.Background())
+	}()
+
+	select {
+	case <-connectEntered:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected Start to enter connect path")
+	}
+
+	// Call Close with pre-canceled context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	closeErr := m.Close(ctx)
+	if closeErr == nil {
+		t.Fatal("expected Close to return error for canceled context")
+	}
+
+	var runtimeErr *runtimeerr.Error
+	if errors.As(closeErr, &runtimeErr) {
+		if runtimeErr.Code != runtimeerr.CodeShutdown {
+			t.Fatalf("expected CodeShutdown, got %v", runtimeErr.Code)
+		}
+	} else {
+		t.Fatalf("expected runtimeerr.Error, got %v", closeErr)
+	}
+
+	m.mu.Lock()
+	if !m.closeRequested || !m.closing {
+		m.mu.Unlock()
+		t.Fatal("expected closeRequested and closing flags to remain true after Close cancellation")
+	}
+	m.mu.Unlock()
+
+	// Release connection setup block
+	close(releaseConnect)
+
+	// Wait for Start to resolve
+	startErr := <-startDone
+	if startErr == nil {
+		t.Fatal("expected Start to return error")
+	}
+
+	// Verify flags and state
+	m.mu.Lock()
+	if m.closeRequested || m.closing {
+		m.mu.Unlock()
+		t.Fatal("expected closeRequested and closing flags to be cleared by Start")
+	}
+	if m.health.State != StateClosed {
+		m.mu.Unlock()
+		t.Fatalf("expected manager state to transition to StateClosed, got %v", m.health.State)
+	}
+	m.mu.Unlock()
+}

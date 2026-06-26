@@ -403,7 +403,7 @@ func TestStoreDesiredConfigReturnsMetadataFromPostReadEntry(t *testing.T) {
 				bucket:   "cfg_desired",
 				key:      "desired.vyos",
 				value:    []byte(`{"version":"1.0"}`),
-				revision: 17,
+				revision: 9,
 				created:  postReadCreated,
 			}, nil
 		},
@@ -427,11 +427,60 @@ func TestStoreDesiredConfigReturnsMetadataFromPostReadEntry(t *testing.T) {
 	if stored.Key != "desired.vyos" {
 		t.Fatalf("expected key %q, got %q", "desired.vyos", stored.Key)
 	}
-	if stored.Revision != 17 {
-		t.Fatalf("expected revision %d, got %d", 17, stored.Revision)
+	if stored.Revision != 9 {
+		t.Fatalf("expected revision %d, got %d", 9, stored.Revision)
 	}
 	if !stored.CreatedAt.Equal(postReadCreated) {
 		t.Fatalf("expected CreatedAt %v, got %v", postReadCreated, stored.CreatedAt)
+	}
+}
+
+/*
+TC-KV-STORE-007B
+Type: Positive
+Title: StoreDesiredConfig does not overwrite revision on concurrent write
+Summary:
+Verifies that store path does not overwrite revision returned by Put when Get returns
+a different revision (concurrent write), and falls back to input record timestamp.
+Validates:
+  - returned revision is the Put revision (9)
+  - CreatedAt falls back to input record timestamp (rec.Timestamp)
+*/
+func TestStoreDesiredConfigDoesNotOverwriteRevisionOnConcurrentWrite(t *testing.T) {
+	rec := validDesiredConfigRecordForTests()
+	postReadCreated := rec.Timestamp.Add(5 * time.Second)
+	kvHandle := &stubKeyValue{
+		putFn: func(context.Context, string, []byte) (uint64, error) {
+			return 9, nil
+		},
+		getFn: func(context.Context, string) (jetstream.KeyValueEntry, error) {
+			return stubKeyValueEntry{
+				bucket:   "cfg_desired",
+				key:      "desired.vyos",
+				value:    []byte(`{"version":"1.0"}`),
+				revision: 17,
+				created:  postReadCreated,
+			}, nil
+		},
+	}
+	runtime := &stubRuntimeProvider{kv: kvHandle, bucket: "cfg_desired", keyPattern: "desired.%s"}
+	store, err := NewStore(runtime, nil)
+	if err != nil {
+		t.Fatalf("expected nil constructor error, got %v", err)
+	}
+
+	stored, err := store.StoreDesiredConfig(context.Background(), rec)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if stored == nil {
+		t.Fatal("expected non-nil stored result")
+	}
+	if stored.Revision != 9 {
+		t.Fatalf("expected revision %d, got %d", 9, stored.Revision)
+	}
+	if !stored.CreatedAt.Equal(rec.Timestamp) {
+		t.Fatalf("expected CreatedAt to fall back to record timestamp %v, got %v", rec.Timestamp, stored.CreatedAt)
 	}
 }
 

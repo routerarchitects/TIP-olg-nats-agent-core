@@ -200,6 +200,11 @@ func (m *Manager) Start(ctx context.Context) error {
 			m.startDone = nil
 		}
 		m.starting = false
+		if m.closeRequested || m.closing {
+			m.closeRequested = false
+			m.closing = false
+			m.setClosedLocked(nil)
+		}
 		m.mu.Unlock()
 	}()
 
@@ -268,6 +273,9 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	m.mu.Lock()
 	if m.closeRequested || m.closing {
+		m.closeRequested = false
+		m.closing = false
+		m.setClosedLocked(nil)
 		m.mu.Unlock()
 		nc.Close()
 		return &runtimeerr.Error{
@@ -325,8 +333,6 @@ func (m *Manager) Close(ctx context.Context) error {
 		case <-ctx.Done():
 			m.mu.Lock()
 			m.setDegradedLocked(ctx.Err())
-			m.closeRequested = false
-			m.closing = false
 			m.mu.Unlock()
 			return &runtimeerr.Error{
 				Code:      runtimeerr.CodeShutdown,

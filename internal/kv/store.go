@@ -98,9 +98,10 @@ func (s *Store) StoreDesiredConfig(ctx context.Context, rec DesiredConfigRecord)
 	createdAt := rec.Timestamp
 	entry, getErr := kvHandle.Get(opCtx, key)
 	if getErr == nil {
-		revision = entry.Revision()
-		if !entry.Created().IsZero() {
-			createdAt = entry.Created()
+		if entry.Revision() == revision {
+			if !entry.Created().IsZero() {
+				createdAt = entry.Created()
+			}
 		}
 	} else {
 		s.reportAsync(kvReadError("store_desired_config_post_read", "stored config metadata lookup failed", getErr))
