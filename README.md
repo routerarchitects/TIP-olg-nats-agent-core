@@ -229,13 +229,9 @@ The main public APIs currently usable by an owning agent are:
 
 ## Handler execution model
 
-Registered configure/action/result/status handlers are executed inline from the
-NATS subscription callback path.
+Registered configure/action/result/status handlers, as well as the custom reconnect handler registered via `WithReconnectHandler`, are executed inline from the NATS subscription and connection callback paths.
 
-Handlers should return quickly. Long-running or blocking work should be
-offloaded by the agent to a goroutine, worker pool, or internal job queue.
-This prevents later messages on the same subscription from being delayed and
-helps avoid backpressure in callback processing.
+Handlers and callbacks must return quickly. Any long-running or blocking work (for example, applying configurations, executing actions, or performing database reconnects inside the reconnect handler) must be offloaded by the agent to a separate goroutine, worker pool, or internal job queue. This prevents stalling the connection reconnect dispatch, avoids delaying subscription restorations, and prevents backpressure in callback processing.
 
 The library recovers from any panics thrown by user configure, action, result, and status handlers (which are caught, logged, and recorded as metrics failures). For the custom reconnect handler, any caught panic is logged and also reported to the registered `errorSink` (if provided) to prevent agent crashes.
 

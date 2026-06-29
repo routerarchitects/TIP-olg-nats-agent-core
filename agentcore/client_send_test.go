@@ -693,3 +693,74 @@ func TestPublicSendAPIsRejectNilAndCanceledContexts(t *testing.T) {
 		})
 	}
 }
+
+/*
+TC-CLIENT-SEND-013
+Type: Negative
+Title: PublishResult rejects invalid CommandType values
+Summary:
+Verifies that PublishResult rejects result envelopes with CommandType values
+other than "configure" or "action" (if command_type is present).
+Validates:
+  - CommandType value "invalid" returns CodeValidation
+  - publish is not called
+*/
+func TestPublishResultRejectsInvalidCommandType(t *testing.T) {
+	client, pub := newSendTestClient(t)
+	msg := validSendResultEnvelope()
+	msg.CommandType = "invalid"
+
+	err := client.PublishResult(context.Background(), msg)
+	requireErrorCode(t, err, CodeValidation)
+	if len(pub.calls) != 0 {
+		t.Fatalf("expected zero publish calls on validation failure, got %d", len(pub.calls))
+	}
+}
+
+/*
+TC-CLIENT-SEND-014
+Type: Negative
+Title: PublishResult configure-type requires UUID
+Summary:
+Verifies that PublishResult rejects configure-type result envelopes when the
+configuration UUID is missing or empty.
+Validates:
+  - configure CommandType with empty UUID returns CodeValidation
+  - publish is not called
+*/
+func TestPublishResultConfigureRequiresUUID(t *testing.T) {
+	client, pub := newSendTestClient(t)
+	msg := validSendResultEnvelope()
+	msg.CommandType = "configure"
+	msg.UUID = ""
+
+	err := client.PublishResult(context.Background(), msg)
+	requireErrorCode(t, err, CodeValidation)
+	if len(pub.calls) != 0 {
+		t.Fatalf("expected zero publish calls on validation failure, got %d", len(pub.calls))
+	}
+}
+
+/*
+TC-CLIENT-SEND-015
+Type: Negative
+Title: PublishResult action-type requires Action name
+Summary:
+Verifies that PublishResult rejects action-type result envelopes when the
+action name is missing or empty.
+Validates:
+  - action CommandType with empty Action returns CodeValidation
+  - publish is not called
+*/
+func TestPublishResultActionRequiresActionName(t *testing.T) {
+	client, pub := newSendTestClient(t)
+	msg := validSendResultEnvelope()
+	msg.CommandType = "action"
+	msg.Action = ""
+
+	err := client.PublishResult(context.Background(), msg)
+	requireErrorCode(t, err, CodeValidation)
+	if len(pub.calls) != 0 {
+		t.Fatalf("expected zero publish calls on validation failure, got %d", len(pub.calls))
+	}
+}

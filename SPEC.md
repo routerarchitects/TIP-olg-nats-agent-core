@@ -274,7 +274,7 @@ After reconnect, the library must:
 - restore subscriptions
 - restore handler registrations
 - rebuild required NATS/JetStream/KV handles as needed
-- invoke the custom reconnect handler (if registered using `WithReconnectHandler(handler func())`) only after all subscriptions are restored
+- invoke the custom reconnect handler (if registered using `WithReconnectHandler(handler func())`) only after all subscriptions and KV watches are successfully restored
 
 The library must also support agent recovery flows in which an agent:
 - starts or restarts

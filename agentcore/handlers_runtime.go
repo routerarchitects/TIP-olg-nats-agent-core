@@ -933,6 +933,23 @@ func validateResultEnvelope(op string, msg ResultEnvelope) error {
 	if err := optionalString(op, "error_code", msg.ErrorCode); err != nil {
 		return err
 	}
+
+	if msg.CommandType != "" {
+		if msg.CommandType != "configure" && msg.CommandType != "action" {
+			return validationError(op, "command_type must be either 'configure' or 'action'")
+		}
+		if msg.CommandType == "configure" {
+			if strings.TrimSpace(msg.UUID) == "" {
+				return validationError(op, "uuid is required for configure results")
+			}
+		}
+		if msg.CommandType == "action" {
+			if strings.TrimSpace(msg.Action) == "" {
+				return validationError(op, "action is required for action results")
+			}
+		}
+	}
+
 	return optionalJSON(op, "payload", msg.Payload)
 }
 
