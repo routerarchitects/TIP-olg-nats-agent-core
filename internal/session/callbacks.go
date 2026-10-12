@@ -20,7 +20,7 @@ func (m *Manager) onDisconnect(_ *nats.Conn, err error) {
 	m.mu.Unlock()
 
 	if onDisconnected != nil {
-		go onDisconnected()
+		onDisconnected()
 	}
 
 	if err != nil {

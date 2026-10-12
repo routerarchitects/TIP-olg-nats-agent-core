@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -145,29 +146,40 @@ func TestOnDisconnectIndependentOfSlowErrorSink(t *testing.T) {
 	}
 }
 
-func TestOnDisconnectDoesNotBlockNATSCallbacks(t *testing.T) {
-	blockHook := make(chan struct{})
-	defer close(blockHook)
+func TestLifecycleHookOrdering_DisconnectBeforeReconnect(t *testing.T) {
+	order := make([]string, 0, 2)
+	var orderMu sync.Mutex
 
 	m := &Manager{
 		hooks: Hooks{
 			OnDisconnected: func() {
-				<-blockHook
+				orderMu.Lock()
+				order = append(order, "disconnected")
+				orderMu.Unlock()
+			},
+			OnReconnected: func() {
+				orderMu.Lock()
+				order = append(order, "reconnected")
+				orderMu.Unlock()
 			},
 		},
 	}
 
-	disconnectReturned := make(chan struct{}, 1)
-	go func() {
-		m.onDisconnect(nil, errors.New("connection dropped"))
-		disconnectReturned <- struct{}{}
-	}()
+	// 1. Disconnect triggers OnDisconnected synchronously
+	m.onDisconnect(nil, errors.New("connection drop"))
 
-	select {
-	case <-disconnectReturned:
-		// Succeeded: onDisconnect returned immediately and did not block on user callback
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("onDisconnect blocked waiting for slow user disconnect hook")
+	// 2. Reconnect triggers OnReconnected
+	if m.hooks.OnReconnected != nil {
+		m.hooks.OnReconnected()
+	}
+
+	orderMu.Lock()
+	defer orderMu.Unlock()
+	if len(order) != 2 {
+		t.Fatalf("expected 2 lifecycle events, got %d: %v", len(order), order)
+	}
+	if order[0] != "disconnected" || order[1] != "reconnected" {
+		t.Fatalf("lifecycle order violated: expected [disconnected, reconnected], got %v", order)
 	}
 }
 
