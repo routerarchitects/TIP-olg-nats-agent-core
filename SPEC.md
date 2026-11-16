@@ -208,11 +208,11 @@ For action flows:
 - result/status must carry `rpc_id`
 - action-specific fields may be included as needed by the action contract
 
-For periodic device state:
-- The library provides a dedicated `StateEnvelope` containing `target`, `uuid`, `timestamp`, and the structured state `payload` (e.g. OpenWiFi state schema).
+For periodic and on-demand device state:
+- The library provides a dedicated `StateEnvelope` containing `target` (string), `uuid` (string representing the applied configuration version as a decimal integer, or `""`/`"0"` when unapplied), `timestamp` (ISO 8601 string), and `payload` (pure telemetry payload adhering to the OpenWiFi state schema, excluding inner identity fields).
 - **Strict Subject & Contract Separation:**
-  - `status.<target>` is strictly reserved for lifecycle events (startup) and configure/action execution progress.
-  - `state.<target>` is used exclusively for periodic operational state and telemetry.
+  - `status.<target>` and `status.get.<target>` are strictly reserved for lifecycle events (startup) and configure/action execution progress.
+  - `state.<target>` is used exclusively for periodic operational state streams, and `state.get.<target>` is used exclusively for on-demand live state queries.
   - These message types are not interchangeable. Publishing full device-state payloads on the status subject could cause consumers to interpret them as progress/status messages or reject them as invalid.
 
 ---
@@ -225,7 +225,9 @@ The default subject structure is target-oriented:
 - `cmd.action.<target>.<action>`
 - `result.<target>`
 - `status.<target>`
+- `status.get.<target>`
 - `state.<target>`
+- `state.get.<target>`
 - `health.<target>`
 
 All subject generation must be centralized in the library (`internal/subjects`).
@@ -238,7 +240,9 @@ Subject routing rules:
 - `cmd.action.<target>.<action>`: Direct action command delivery.
 - `result.<target>`: Final command completion/failure outcomes.
 - `status.<target>`: Lifecycle states and configure/action progress transitions.
+- `status.get.<target>`: Request-reply queries for device status and upgrade recovery.
 - `state.<target>`: Periodic operational device state and telemetry.
+- `state.get.<target>`: On-demand request-reply queries for fresh, live operational state.
 - `health.<target>`: Component liveness and health reports.
 
 ---
@@ -308,9 +312,9 @@ The public API should provide, at minimum, support for:
 - health reporting
 - configure submission
 - action submission
-- result, status, and state publication (`PublishResult`, `PublishStatus`, `PublishState`)
+- result, status, and state publication (`PublishResult`, `PublishStatus`, `PublishState`, `RequestState`)
 - desired config store/load/watch
-- handler registration for configure, action, result, status, and state (`RegisterStateHandler`)
+- handler registration for configure, action, result, status, and state (`RegisterStateHandler`, `RegisterStateGetHandler`)
 - custom reconnect handler registration via `WithReconnectHandler(handler func())`
 
 The desired-config read API should return the decoded current desired-config record, including the config UUID needed for sync decisions.
@@ -376,4 +380,4 @@ The following are normative design invariants:
 8. Configure outcomes must include the **config UUID** that was attempted or applied.
 9. Revision-driven config ordering and rollback semantics are out of scope.
 10. Platform-specific execution logic remains outside the shared library.
-11. `state.<target>` is used exclusively for periodic operational state; `status.<target>` is reserved for lifecycle and execution progress.
+11. `state.<target>` and `state.get.<target>` are used exclusively for periodic and on-demand operational state; `status.<target>` and `status.get.<target>` are reserved for lifecycle and execution progress.

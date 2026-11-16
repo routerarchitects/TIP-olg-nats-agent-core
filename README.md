@@ -249,10 +249,14 @@ The dedicated state messaging contract defined in [SPEC.md](SPEC.md) is planned 
 
 - `PublishState(ctx, envelope StateEnvelope) error`
 - `RegisterStateHandler(target string, handler func(StateEnvelope)) error`
-- Dedicated subject pattern: `state.<target>`
+- `RequestState(ctx, target string) (StateEnvelope, error)`
+- `RegisterStateGetHandler(target string, handler func() (StateEnvelope, error)) error`
+- Dedicated subject patterns:
+  - Periodic stream: `state.<target>`
+  - On-demand live query: `state.get.<target>`
 - Dedicated envelope: `StateEnvelope`
 
-These APIs will provide standard periodic operational state publication and subscription across agents once implemented, strictly separated from `status.<target>`.
+These APIs will provide standard periodic operational state publication, subscription, and on-demand live state queries across agents once implemented, strictly separated from `status.<target>` and `status.get.<target>`.
 
 ---
 
