@@ -68,13 +68,11 @@ Current code includes:
   - `SubmitAction(...)`
   - `PublishResult(...)`
   - `PublishStatus(...)`
-  - `PublishState(...)`
 - public handler registration APIs:
   - `RegisterConfigureHandler(...)`
   - `RegisterActionHandler(...)`
   - `RegisterResultHandler(...)`
   - `RegisterStatusHandler(...)`
-  - `RegisterStateHandler(...)`
 - optional queue-group subscription option:
   - `WithQueueGroup(...)`
 - optional client constructor options:
@@ -82,12 +80,12 @@ Current code includes:
 - deferred registration support before `Start(ctx)`
 - configure store-then-notify flow via `SubmitConfigure(...)`
 - direct action publish flow via `SubmitAction(...)`
-- public result/status/state publish via `PublishResult(...)`, `PublishStatus(...)`, and `PublishState(...)`
+- public result/status publish via `PublishResult(...)` and `PublishStatus(...)`
 - low-level NATS publish/flush/timeout behavior centralized in `internal/transport.Publisher`
 - subscribe readiness synchronized with NATS using a flush before marking subscriptions active
 - reconnect-safe subscription restoration from in-memory registry intent
 - session-closed subscription cleanup that clears active handles while preserving registration intent
-- receive-side callback decode/validate/dispatch for configure/action/result/status/state
+- receive-side callback decode/validate/dispatch for configure/action/result/status
 - receive-side result correlation via preserved `rpc_id` in `ResultEnvelope`
 - lifecycle-context handler dispatch with cancellation on close/session shutdown
 - public sender-to-receiver integration coverage on real `nats-server`, including action/result round-trip and reconnect restore with public `PublishResult(...)`
@@ -105,15 +103,14 @@ The library currently helps agents:
 - load desired configuration from JetStream KV
 - optionally watch desired configuration updates
 - retrieve the latest desired configuration for startup reconciliation
-- register configure/action/result/status/state handlers before or after `Start(ctx)`
+- register configure/action/result/status handlers before or after `Start(ctx)`
 - restore handler subscriptions after reconnect without manual re-registration
-- receive typed configure/action/result/status/state messages through callback binding
+- receive typed configure/action/result/status messages through callback binding
 - correlate received results using preserved `rpc_id`
 - submit configure commands with store-then-notify semantics
 - submit action commands through direct publish
 - publish result envelopes
 - publish status envelopes
-- publish state envelopes
 - compose public sender and receiver APIs into agent-to-agent flows
 
 ---
@@ -168,7 +165,9 @@ As of the current implementation:
 2. Calling side receives the message through the library
 3. Correlation is performed using shared message fields
 
-### State flow (periodic operational state)
+### State flow (periodic operational state - planned)
+
+*(Note: State messaging architecture is specified in [SPEC.md](SPEC.md); library implementation of `PublishState` and `RegisterStateHandler` is planned for an upcoming release).*
 
 1. Publishing agent collects operational metrics and telemetry
 2. Agent calls `PublishState(...)` with a validated `StateEnvelope`
@@ -187,7 +186,7 @@ There is currently no separate public API to retry only the configure notificati
 
 ### Context behavior for send APIs
 
-Public send APIs (`SubmitConfigure(...)`, `SubmitAction(...)`, `PublishResult(...)`, `PublishStatus(...)`, and `PublishState(...)`) require a non-nil, active context. Nil or already canceled contexts are rejected before any KV store or publish work is attempted. The library does not silently replace nil context with `context.Background()`; callers are expected to provide cancellation and timeout behavior explicitly.
+Public send APIs (`SubmitConfigure(...)`, `SubmitAction(...)`, `PublishResult(...)`, and `PublishStatus(...)`) require a non-nil, active context. Nil or already canceled contexts are rejected before any KV store or publish work is attempted. The library does not silently replace nil context with `context.Background()`; callers are expected to provide cancellation and timeout behavior explicitly.
 
 ---
 
@@ -236,19 +235,30 @@ The main public APIs currently usable by an owning agent are:
 - `SubmitAction(...)`
 - `PublishResult(...)`
 - `PublishStatus(...)`
-- `PublishState(...)`
 - `RegisterConfigureHandler(...)`
 - `RegisterActionHandler(...)`
 - `RegisterResultHandler(...)`
 - `RegisterStatusHandler(...)`
-- `RegisterStateHandler(...)`
 - `WithReconnectHandler(...)`
+
+---
+
+## Planned APIs (State Messaging Specification)
+
+The dedicated state messaging contract defined in [SPEC.md](SPEC.md) is planned for upcoming implementation (PR #11 establishes the architectural specification):
+
+- `PublishState(ctx, envelope StateEnvelope) error`
+- `RegisterStateHandler(target string, handler func(StateEnvelope)) error`
+- Dedicated subject pattern: `state.<target>`
+- Dedicated envelope: `StateEnvelope`
+
+These APIs will provide standard periodic operational state publication and subscription across agents once implemented, strictly separated from `status.<target>`.
 
 ---
 
 ## Handler execution model
 
-Registered configure/action/result/status/state handlers, as well as the custom reconnect handler registered via `WithReconnectHandler`, are executed inline from the NATS subscription and connection callback paths.
+Registered configure/action/result/status handlers (as well as planned state handlers), as well as the custom reconnect handler registered via `WithReconnectHandler`, are executed inline from the NATS subscription and connection callback paths.
 
 Handlers and callbacks must return quickly. Any long-running or blocking work (for example, applying configurations, executing actions, or performing database reconnects inside the reconnect handler) must be offloaded by the agent to a separate goroutine, worker pool, or internal job queue. This prevents stalling the connection reconnect dispatch, avoids delaying subscription restorations, and prevents backpressure in callback processing.
 
