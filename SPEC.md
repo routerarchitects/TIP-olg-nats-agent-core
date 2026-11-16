@@ -209,7 +209,25 @@ For action flows:
 - action-specific fields may be included as needed by the action contract
 
 For periodic and on-demand device state:
-- The library provides a dedicated `StateEnvelope` containing `target` (string), `uuid` (string representing the applied configuration version as a decimal integer, or `""`/`"0"` when unapplied), `timestamp` (ISO 8601 string), and `payload` (pure telemetry payload adhering to the OpenWiFi state schema, excluding inner identity fields).
+- The library provides a dedicated `StateEnvelope` wire contract:
+  ```go
+  type StateEnvelope struct {
+  	Version   string          `json:"version"`
+  	Target    string          `json:"target"`
+  	UUID      string          `json:"uuid"`
+  	Payload   json.RawMessage `json:"payload"`
+  	Timestamp time.Time       `json:"timestamp"`
+  }
+  ```
+- **Envelope Field Validation Rules:**
+  - `Version`: Must match supported wire protocol version (`"1.0"`).
+  - `Target`: Validated against safe target naming rules (non-empty, alphanumeric and dashes, no wildcards).
+  - `UUID`: Sourced from the local applied configuration checkpoint. Represents the **applied configuration identity**, NOT a request ID.
+    - Its conversion to the Gateway's numeric `params.uuid` belongs to `uCentral`.
+    - If the applied UUID is not known yet (e.g. initial boot before controller configuration), `UUID` is empty string `""` or `"0"`.
+    - State **can and should** be emitted before first successful configuration to report baseline operational telemetry.
+  - `Payload`: Non-empty, valid JSON, strictly bounded to a maximum size of **1 MB** (consistent with uCentral's 1 MB state limit). Oversized payloads must fail validation before callback delivery.
+  - `Timestamp`: Must be a valid non-zero ISO 8601 timestamp (`time.Time`).
 - **Strict Subject & Contract Separation:**
   - `status.<target>` and `status.get.<target>` are strictly reserved for lifecycle events (startup) and configure/action execution progress.
   - `state.<target>` is used exclusively for periodic operational state streams, and `state.get.<target>` is used exclusively for on-demand live state queries.
@@ -321,6 +339,38 @@ The desired-config read API should return the decoded current desired-config rec
 
 The design does **not** require an API for loading arbitrary KV revisions.
 
+### 12.1 State Messaging Architecture & Implementation Scope (Planned APIs)
+
+State messaging is specified as a first-class message kind throughout `agentcore`. The planned implementation scope encompasses:
+
+1. **First-Class Message Kind (`KindState`):** Registered alongside `KindConfigure`, `KindAction`, `KindResult`, and `KindStatus`.
+2. **Standard Handler Signatures:**
+   ```go
+   type StateHandler func(context.Context, StateEnvelope) error
+   type StateGetHandler func(context.Context) (StateEnvelope, error)
+   ```
+   * Receives `context.Context` to participate in connection/lifecycle cancellation.
+   * Returns `error` to participate in error logging and metrics counters (`metrics.IncErrors`).
+   * Supports `opts ...SubscriptionOption` (including `WithQueueGroup`).
+3. **Public Client Methods:**
+   ```go
+   PublishState(ctx context.Context, envelope StateEnvelope) error
+   RegisterStateHandler(target string, handler StateHandler, opts ...SubscriptionOption) error
+   RequestState(ctx context.Context, target string) (StateEnvelope, error)
+   RegisterStateGetHandler(target string, handler StateGetHandler, opts ...SubscriptionOption) error
+   ```
+4. **Subject Model & Builder Methods:**
+   * Default patterns: `DefaultStatePattern = "state.%s"`, `DefaultStateGetPattern = "state.get.%s"`.
+   * Optional validated pattern overrides configurable in `agentcore.Config`.
+   * Centralized subject builders in `internal/subjects`: `State(target string) (string, error)` and `StateGet(target string) (string, error)`.
+5. **Subscription Registry & Reconnect Restoration:** Handlers registered via `RegisterStateHandler` and `RegisterStateGetHandler` are stored in `internal/registry` and automatically re-subscribed upon broker reconnection.
+6. **Required Test Matrix:**
+   * Malformed and wildcard subject rejection.
+   * Malformed or oversized payload rejection (> 1 MB).
+   * Callback error propagation and panic recovery metrics.
+   * Reconnect restoration validation under broker restart.
+7. **Scope Boundary:** PR #11 establishes the architectural and interface contract as **strictly docs-only** until code implementation begins.
+
 ---
 
 ## 13. Validation and error handling
@@ -335,6 +385,14 @@ The library must **not** implement deep cloud business-policy validation.
 Public APIs must return clear, typed errors with structured codes where appropriate.
 
 The library must safely recover from panics thrown in user-supplied configure, action, result, status, and state handlers (which are caught, logged, and recorded in metrics as failures) and the custom reconnect handler, preventing application crashes. For session-level connection/reconnection failures and panics originating in the custom reconnect handler callback, errors/panics must also be propagated to the registered `errorSink` (if provided).
+
+### 13.1 Bounding State Handlers & Backpressure Policy
+
+Because callbacks are invoked inline on the NATS subscription dispatcher:
+* **Payload Bounding:** State payloads can contain large interface and neighbor snapshots. The library enforces a strict maximum payload size of **1 MB** (matching uCentral's 1 MB state limit). Payloads exceeding 1 MB are discarded with a validation error before callback execution.
+* **Nonblocking Execution & Bounded Handoff:** Handlers must return quickly. Consuming agents (such as `ucentral-client`) must hand off incoming state envelopes to bounded queues or last-write-wins coalescers (`StateCoalescer`) rather than executing blocking I/O or spawning unbounded goroutines inline.
+* **Best-Effort Telemetry Delivery:** Periodic state streams over Core NATS are inherently best-effort. Core NATS publication does not imply JetStream durable delivery; dropped intermediate samples during network disconnection are safely superseded by the subsequent periodic state snapshot.
+* **Observability:** Dropped messages, oversized payload rejections, handler errors, and reconnect events must increment observable metric counters (`metrics.IncErrors`, `metrics.IncPanics`).
 
 ---
 

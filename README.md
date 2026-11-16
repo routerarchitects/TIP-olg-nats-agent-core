@@ -247,10 +247,12 @@ The main public APIs currently usable by an owning agent are:
 
 The dedicated state messaging contract defined in [SPEC.md](SPEC.md) is planned for upcoming implementation (PR #11 establishes the architectural specification):
 
-- `PublishState(ctx, envelope StateEnvelope) error`
-- `RegisterStateHandler(target string, handler func(StateEnvelope)) error`
-- `RequestState(ctx, target string) (StateEnvelope, error)`
-- `RegisterStateGetHandler(target string, handler func() (StateEnvelope, error)) error`
+- `type StateHandler func(context.Context, StateEnvelope) error`
+- `type StateGetHandler func(context.Context) (StateEnvelope, error)`
+- `PublishState(ctx context.Context, envelope StateEnvelope) error`
+- `RegisterStateHandler(target string, handler StateHandler, opts ...SubscriptionOption) error`
+- `RequestState(ctx context.Context, target string) (StateEnvelope, error)`
+- `RegisterStateGetHandler(target string, handler StateGetHandler, opts ...SubscriptionOption) error`
 - Dedicated subject patterns:
   - Periodic stream: `state.<target>`
   - On-demand live query: `state.get.<target>`
