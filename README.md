@@ -253,6 +253,9 @@ The dedicated state messaging contract defined in [SPEC.md](SPEC.md) is planned 
 - `RegisterStateHandler(target string, handler StateHandler, opts ...SubscriptionOption) error`
 - `RequestState(ctx context.Context, target string) (StateEnvelope, error)`
 - `RegisterStateGetHandler(target string, handler StateGetHandler, opts ...SubscriptionOption) error`
+  - Bounded concurrency: configurable per-agent worker capacity (default: 5 workers).
+  - No pending queue: immediately replies with correlated `service_busy` error when capacity is saturated.
+  - Nonblocking NATS callback: validates and admits requests, then executes collection asynchronously with a 3-second deadline context.
 - Dedicated subject patterns:
   - Periodic stream: `state.<target>`
   - On-demand live query: `state.get.<target>`

@@ -364,12 +364,21 @@ State messaging is specified as a first-class message kind throughout `agentcore
    * Optional validated pattern overrides configurable in `agentcore.Config`.
    * Centralized subject builders in `internal/subjects`: `State(target string) (string, error)` and `StateGet(target string) (string, error)`.
 5. **Subscription Registry & Reconnect Restoration:** Handlers registered via `RegisterStateHandler` and `RegisterStateGetHandler` are stored in `internal/registry` and automatically re-subscribed upon broker reconnection.
-6. **Required Test Matrix:**
+6. **On-Demand Concurrency Bounding (`RegisterStateGetHandler`):**
+   * **Configurable Worker Capacity:** The library accepts a configurable execution capacity supplied during agentcore client initialization (`Config.StateGetWorkers`, default: `5`). Implementation uses a bounded worker pool or semaphore (default 5 slots).
+   * **No Pending Queue / Immediate `service_busy` Reply:** If all worker slots are occupied when a request arrives, the handler must NOT buffer or queue the request. It immediately returns a typed, correlated `service_busy` error reply to the NATS reply inbox.
+   * **3-Second Collection Deadline:** Each live-state collection execution is bound to a strict 3-second context cancellation (`context.WithTimeout(ctx, 3*time.Second)`), preventing hung collections and ensuring completion well within caller NATS deadlines (e.g. uCentral's 5-second deadline).
+   * **Nonblocking NATS Callback:** The NATS subscription callback must perform only envelope validation and semaphore admission, then hand off collection asynchronously to a worker goroutine. It must NEVER run the 3-second collection inline on the NATS subscription dispatcher thread, preventing starvation of configure or action handlers.
+   * **Capacity Release & Observability:** Worker capacity is released on every terminal condition (`defer sem.Release()`), covering successful completion, error, panic recovery, and context cancellation. The library exposes metrics for active workers (`gauge`), busy rejections (`counter`), and timeouts (`counter`).
+7. **Required Test Matrix:**
    * Malformed and wildcard subject rejection.
    * Malformed or oversized payload rejection (> 1 MB).
    * Callback error propagation and panic recovery metrics.
    * Reconnect restoration validation under broker restart.
-7. **Scope Boundary:** PR #11 establishes the architectural and interface contract as **strictly docs-only** until code implementation begins.
+   * Concurrency saturation: 5 active requests saturate capacity; the 6th simultaneous request immediately receives a `service_busy` error reply.
+   * Worker release verification across success, handler error, 3-second timeout, and panic recovery.
+   * Subscription isolation: concurrent on-demand state collections do not starve or delay configure/action command dispatches.
+8. **Scope Boundary:** PR #11 establishes the architectural and interface contract as **strictly docs-only** until code implementation begins.
 
 ---
 
@@ -390,7 +399,8 @@ The library must safely recover from panics thrown in user-supplied configure, a
 
 Because callbacks are invoked inline on the NATS subscription dispatcher:
 * **Payload Bounding:** State payloads can contain large interface and neighbor snapshots. The library enforces a strict maximum payload size of **1 MB** (matching uCentral's 1 MB state limit). Payloads exceeding 1 MB are discarded with a validation error before callback execution.
-* **Nonblocking Execution & Bounded Handoff:** Handlers must return quickly. Consuming agents (such as `ucentral-client`) must hand off incoming state envelopes to bounded queues or last-write-wins coalescers (`StateCoalescer`) rather than executing blocking I/O or spawning unbounded goroutines inline.
+* **Nonblocking Execution & Bounded Handoff:** Handlers must return quickly. Consuming agents (such as `ucentral-client`) must hand off incoming state envelopes to bounded queues or last-write-wins coalescers (`StateCoalescer`) rather than executing blocking I/O or spawning unbounded goroutines inline. For on-demand state queries (`state.get`), the subscription dispatcher validates and admits requests against the 5-slot worker limit before handing execution off to an asynchronous worker goroutine, keeping subscription dispatch loops completely nonblocking.
+* **On-Demand Concurrency & Service Busy Policy:** On-demand state queries are subject to a strict worker capacity limit (default: 5 concurrent workers) with no waiting queue. If the pool is saturated, incoming requests receive an immediate `service_busy` error reply rather than queueing or timing out. Each admitted collection is bounded to a 3-second context deadline.
 * **Best-Effort Telemetry Delivery:** Periodic state streams over Core NATS are inherently best-effort. Core NATS publication does not imply JetStream durable delivery; dropped intermediate samples during network disconnection are safely superseded by the subsequent periodic state snapshot.
 * **Observability:** Dropped messages, oversized payload rejections, handler errors, and reconnect events must increment observable metric counters (`metrics.IncErrors`, `metrics.IncPanics`).
 
