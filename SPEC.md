@@ -364,21 +364,130 @@ State messaging is specified as a first-class message kind throughout `agentcore
    * Optional validated pattern overrides configurable in `agentcore.Config`.
    * Centralized subject builders in `internal/subjects`: `State(target string) (string, error)` and `StateGet(target string) (string, error)`.
 5. **Subscription Registry & Reconnect Restoration:** Handlers registered via `RegisterStateHandler` and `RegisterStateGetHandler` are stored in `internal/registry` and automatically re-subscribed upon broker reconnection.
-6. **On-Demand Concurrency Bounding (`RegisterStateGetHandler`):**
+6. **On-Demand State Request/Reply Wire Contract (`StateGetReply`):**
+   * **Wire Model Structure:**
+     ```go
+     // StateGetReply models the request-reply wire payload returned on the NATS reply inbox for state.get.<target>.
+     // It encapsulates versioning, target identity, and exactly one of state or error.
+     type StateGetReply struct {
+     	Version string             `json:"version"`
+     	Target  string             `json:"target"`
+     	State   *StateEnvelope     `json:"state,omitempty"`
+     	Error   *StateGetWireError `json:"error,omitempty"`
+     }
+
+     type StateGetWireError struct {
+     	Code    string `json:"code"`
+     	Message string `json:"message"`
+     }
+     ```
+   * **Mutual Exclusion & Validation Invariant:**
+     * A valid `StateGetReply` MUST contain `version`, `target`, and **exactly one** of `state` or `error`.
+     * If both `state` and `error` are populated, or if both are null/omitted, the reply is malformed and rejected with `ErrMalformedStateGetReply`.
+   * **Destination & Correlation Semantics:**
+     * The reply payload is published strictly to the ephemeral NATS reply inbox (`msg.Reply`, e.g. `_INBOX.<unique>`).
+     * It is NEVER published to `result.<target>` or `status.<target>`.
+     * Request correlation is handled natively by the standard NATS request-reply inbox mechanism; no duplicate RPC ID or wrapper transaction ID is needed in the payload.
+   * **Wire Examples:**
+     * **Success (Wraps StateEnvelope):**
+       ```json
+       {
+         "version": "1.0",
+         "target": "vyos",
+         "state": {
+           "version": "1.0",
+           "uuid": "1793880893",
+           "target": "vyos",
+           "payload": {
+             "version": 1,
+             "unit": { "uptime": 45123 },
+             "interfaces": []
+           },
+           "timestamp": "2026-05-12T10:30:00Z"
+         }
+       }
+       ```
+     * **Worker Saturation Rejection (`service_busy`):**
+       ```json
+       {
+         "version": "1.0",
+         "target": "vyos",
+         "error": {
+           "code": "service_busy",
+           "message": "All state collection workers are occupied"
+         }
+       }
+       ```
+     * **Collection Failure & Timeout:**
+       ```json
+       {
+         "version": "1.0",
+         "target": "vyos",
+         "error": {
+           "code": "collection_failed",
+           "message": "failed to sample kernel interface counters"
+         }
+       }
+       ```
+       ```json
+       {
+         "version": "1.0",
+         "target": "vyos",
+         "error": {
+           "code": "collection_timeout",
+           "message": "state collection exceeded 3s execution deadline"
+         }
+       }
+       ```
+7. **Public Go API & Error Decoding (`RequestState`):**
+   * Method signatures remain idiomatic:
+     ```go
+     type StateGetHandler func(context.Context) (StateEnvelope, error)
+     func (c *Client) RequestState(ctx context.Context, target string) (StateEnvelope, error)
+     ```
+   * Public typed error and error code constants:
+     ```go
+     const (
+     	CodeServiceBusy       = "service_busy"
+     	CodeCollectionFailed  = "collection_failed"
+     	CodeCollectionTimeout = "collection_timeout"
+     )
+
+     type StateGetError struct {
+     	Code    string
+     	Message string
+     }
+
+     func (e *StateGetError) Error() string {
+     	return fmt.Sprintf("state.get: [%s] %s", e.Code, e.Message)
+     }
+     ```
+   * In `RequestState(ctx, target)`, decoding distinguishes:
+     * **Success:** `reply.State != nil` unwraps and returns `(*reply.State, nil)`.
+     * **Typed Error Reply:** `reply.Error != nil` returns `(StateEnvelope{}, &StateGetError{Code: reply.Error.Code, Message: reply.Error.Message})`. Callers can test for `errors.As(err, &stateErr)` and inspect `stateErr.Code == agentcore.CodeServiceBusy`.
+     * **Malformed Reply:** Invalid JSON, missing both fields, or containing both `state` and `error` returns typed `ErrMalformedStateGetReply`.
+     * **NATS No Responders:** Target daemon is not running or listening; returns `nats.ErrNoResponders`.
+     * **Caller Deadline Exceeded:** Caller's context expires before reply arrives (e.g. uCentral's 5s budget); returns `context.DeadlineExceeded` (or `context.Canceled`).
+8. **On-Demand Concurrency Bounding & Execution Limits:**
    * **Configurable Worker Capacity:** The library accepts a configurable execution capacity supplied during agentcore client initialization (`Config.StateGetWorkers`, default: `5`). Implementation uses a bounded worker pool or semaphore (default 5 slots).
-   * **No Pending Queue / Immediate `service_busy` Reply:** If all worker slots are occupied when a request arrives, the handler must NOT buffer or queue the request. It immediately returns a typed, correlated `service_busy` error reply to the NATS reply inbox.
+   * **Immediate Rejection on Saturation (No Waiting Queue):** If all 5 worker slots are occupied when a request arrives, the handler must NOT buffer or queue the request. It immediately returns `StateGetReply` with `error.code: CodeServiceBusy` on the ephemeral NATS reply inbox.
    * **3-Second Collection Deadline:** Each live-state collection execution is bound to a strict 3-second context cancellation (`context.WithTimeout(ctx, 3*time.Second)`), preventing hung collections and ensuring completion well within caller NATS deadlines (e.g. uCentral's 5-second deadline).
    * **Nonblocking NATS Callback:** The NATS subscription callback must perform only envelope validation and semaphore admission, then hand off collection asynchronously to a worker goroutine. It must NEVER run the 3-second collection inline on the NATS subscription dispatcher thread, preventing starvation of configure or action handlers.
    * **Capacity Release & Observability:** Worker capacity is released on every terminal condition (`defer sem.Release()`), covering successful completion, error, panic recovery, and context cancellation. The library exposes metrics for active workers (`gauge`), busy rejections (`counter`), and timeouts (`counter`).
-7. **Required Test Matrix:**
+9. **Required Test Matrix:**
    * Malformed and wildcard subject rejection.
    * Malformed or oversized payload rejection (> 1 MB).
    * Callback error propagation and panic recovery metrics.
    * Reconnect restoration validation under broker restart.
-   * Concurrency saturation: 5 active requests saturate capacity; the 6th simultaneous request immediately receives a `service_busy` error reply.
+   * RequestState positive unwrapping (`TestRequestState_Success`).
+   * Concurrency saturation: 5 active requests saturate capacity; the 6th simultaneous request immediately receives `service_busy` (`TestRequestState_Saturation_ServiceBusy`).
+   * Collection timeout: Handler exceeding 3-second deadline returns `collection_timeout` (`TestRequestState_CollectionTimeout`).
+   * Collection error: Handler returning Go error maps to `collection_failed` (`TestRequestState_CollectionFailed`).
+   * Malformed wire reply: Reply with both `state` and `error` or neither returns `ErrMalformedStateGetReply` (`TestRequestState_Malformed_Dual`, `TestRequestState_Malformed_Empty`).
+   * Transport errors: `nats.ErrNoResponders` and caller `context.DeadlineExceeded` propagated cleanly.
    * Worker release verification across success, handler error, 3-second timeout, and panic recovery.
    * Subscription isolation: concurrent on-demand state collections do not starve or delay configure/action command dispatches.
-8. **Scope Boundary:** PR #11 establishes the architectural and interface contract as **strictly docs-only** until code implementation begins.
+10. **Scope Boundary:** PR #11 establishes the architectural and interface contract as **strictly docs-only** until code implementation begins.
 
 ---
 

@@ -252,14 +252,19 @@ The dedicated state messaging contract defined in [SPEC.md](SPEC.md) is planned 
 - `PublishState(ctx context.Context, envelope StateEnvelope) error`
 - `RegisterStateHandler(target string, handler StateHandler, opts ...SubscriptionOption) error`
 - `RequestState(ctx context.Context, target string) (StateEnvelope, error)`
+  - Decodes `StateGetReply` wire envelope on the ephemeral NATS reply inbox.
+  - Returns `StateEnvelope` on success, or typed `*StateGetError` distinguishing `service_busy`, `collection_failed`, and `collection_timeout`.
+  - Propagates `nats.ErrNoResponders`, caller `context.DeadlineExceeded`, and `ErrMalformedStateGetReply`.
 - `RegisterStateGetHandler(target string, handler StateGetHandler, opts ...SubscriptionOption) error`
   - Bounded concurrency: configurable per-agent worker capacity (default: 5 workers).
-  - No pending queue: immediately replies with correlated `service_busy` error when capacity is saturated.
+  - No pending queue: immediately replies with correlated `service_busy` error (`StateGetReply` with `error.code: "service_busy"`) when capacity is saturated.
   - Nonblocking NATS callback: validates and admits requests, then executes collection asynchronously with a 3-second deadline context.
 - Dedicated subject patterns:
   - Periodic stream: `state.<target>`
   - On-demand live query: `state.get.<target>`
-- Dedicated envelope: `StateEnvelope`
+- Dedicated envelopes:
+  - Periodic stream: `StateEnvelope`
+  - On-demand reply: `StateGetReply` (wraps `StateEnvelope` or structured `error: {code, message}`)
 
 These APIs will provide standard periodic operational state publication, subscription, and on-demand live state queries across agents once implemented, strictly separated from `status.<target>` and `status.get.<target>`.
 
