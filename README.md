@@ -10,7 +10,7 @@ It is intended to provide common bus-facing functionality such as:
 - standard subject naming
 - standard message envelopes
 - configure and action submission helpers
-- result and status publication helpers
+- result, status, and state publication helpers
 - desired configuration storage and retrieval
 
 The library is **not a daemon**.  
@@ -165,6 +165,15 @@ As of the current implementation:
 2. Calling side receives the message through the library
 3. Correlation is performed using shared message fields
 
+### State flow (periodic operational state - planned)
+
+*(Note: State messaging architecture is specified in [SPEC.md](SPEC.md); library implementation of `PublishState` and `RegisterStateHandler` is planned for an upcoming release).*
+
+1. Publishing agent collects operational metrics and telemetry
+2. Agent calls `PublishState(...)` with a validated `StateEnvelope`
+3. Library publishes the payload exclusively on `state.<target>`
+4. Consuming agents (e.g. ucentral-client) receive the state via `RegisterStateHandler(...)`
+
 ### Configure store-then-notify semantics
 
 `SubmitConfigure(...)` performs two separate operations:
@@ -189,7 +198,14 @@ The default subject structure is target-oriented:
 - `cmd.action.<target>.<action>`
 - `result.<target>`
 - `status.<target>`
+- `state.<target>`
 - `health.<target>`
+
+### Subject separation rules
+
+- **`state.<target>` (exclusive):** Used exclusively for periodic operational device state and telemetry.
+- **`status.<target>` (reserved):** Strictly reserved for lifecycle states (startup) and configure/action execution progress transitions.
+- **Non-interchangeability:** Periodic device state has a completely different schema and purpose than lifecycle/progress status. Publishing full device-state payloads on the status subject could cause consumers to interpret them as progress/status messages or reject them as invalid.
 
 ---
 
@@ -227,13 +243,40 @@ The main public APIs currently usable by an owning agent are:
 
 ---
 
+## Planned APIs (State Messaging Specification)
+
+The dedicated state messaging contract defined in [SPEC.md](SPEC.md) is planned for upcoming implementation (PR #11 establishes the architectural specification):
+
+- `type StateHandler func(context.Context, StateEnvelope) error`
+- `type StateGetHandler func(context.Context) (StateEnvelope, error)`
+- `PublishState(ctx context.Context, envelope StateEnvelope) error`
+- `RegisterStateHandler(target string, handler StateHandler, opts ...SubscriptionOption) error`
+- `RequestState(ctx context.Context, target string) (StateEnvelope, error)`
+  - Decodes `StateGetReply` wire envelope on the ephemeral NATS reply inbox.
+  - Returns `StateEnvelope` on success, or typed `*StateGetError` distinguishing `service_busy`, `collection_failed`, and `collection_timeout`.
+  - Propagates `nats.ErrNoResponders`, caller `context.DeadlineExceeded`, and `ErrMalformedStateGetReply`.
+- `RegisterStateGetHandler(target string, handler StateGetHandler, opts ...SubscriptionOption) error`
+  - Bounded concurrency: configurable per-agent worker capacity (default: 5 workers).
+  - No pending queue: immediately replies with correlated `service_busy` error (`StateGetReply` with `error.code: "service_busy"`) when capacity is saturated.
+  - Nonblocking NATS callback: validates and admits requests, then executes collection asynchronously with a 3-second deadline context.
+- Dedicated subject patterns:
+  - Periodic stream: `state.<target>`
+  - On-demand live query: `state.get.<target>`
+- Dedicated envelopes:
+  - Periodic stream: `StateEnvelope`
+  - On-demand reply: `StateGetReply` (wraps `StateEnvelope` or structured `error: {code, message}`)
+
+These APIs will provide standard periodic operational state publication, subscription, and on-demand live state queries across agents once implemented, strictly separated from `status.<target>` and `status.get.<target>`.
+
+---
+
 ## Handler execution model
 
-Registered configure/action/result/status handlers, as well as the custom reconnect handler registered via `WithReconnectHandler`, are executed inline from the NATS subscription and connection callback paths.
+Registered configure/action/result/status handlers (as well as planned state handlers), as well as the custom reconnect handler registered via `WithReconnectHandler`, are executed inline from the NATS subscription and connection callback paths.
 
 Handlers and callbacks must return quickly. Any long-running or blocking work (for example, applying configurations, executing actions, or performing database reconnects inside the reconnect handler) must be offloaded by the agent to a separate goroutine, worker pool, or internal job queue. This prevents stalling the connection reconnect dispatch, avoids delaying subscription restorations, and prevents backpressure in callback processing.
 
-The library recovers from any panics thrown by user configure, action, result, and status handlers (which are caught, logged, and recorded as metrics failures). For the custom reconnect handler, any caught panic is logged and also reported to the registered `errorSink` (if provided) to prevent agent crashes.
+The library recovers from any panics thrown by user configure, action, result, status, and state handlers (which are caught, logged, and recorded as metrics failures). For the custom reconnect handler, any caught panic is logged and also reported to the registered `errorSink` (if provided) to prevent agent crashes.
 
 The library owns subscription registration, callback binding, envelope decoding, and reconnect restore. Agents remain responsible for workload execution and handler concurrency policy.
 
