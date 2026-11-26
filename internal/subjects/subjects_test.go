@@ -36,6 +36,12 @@ func TestDefaultPatternsReturnsStandardDefaults(t *testing.T) {
 	if got.HealthPattern != DefaultHealthPattern {
 		t.Fatalf("expected HealthPattern %q, got %q", DefaultHealthPattern, got.HealthPattern)
 	}
+	if got.StatePattern != DefaultStatePattern {
+		t.Fatalf("expected StatePattern %q, got %q", DefaultStatePattern, got.StatePattern)
+	}
+	if got.StateGetPattern != DefaultStateGetPattern {
+		t.Fatalf("expected StateGetPattern %q, got %q", DefaultStateGetPattern, got.StateGetPattern)
+	}
 }
 
 /*
@@ -140,6 +146,12 @@ func TestPatternsFromConfigPreservesDefaultsForPartialOverrides(t *testing.T) {
 	}
 	if got.HealthPattern != DefaultHealthPattern {
 		t.Fatalf("expected HealthPattern %q, got %q", DefaultHealthPattern, got.HealthPattern)
+	}
+	if got.StatePattern != DefaultStatePattern {
+		t.Fatalf("expected StatePattern %q, got %q", DefaultStatePattern, got.StatePattern)
+	}
+	if got.StateGetPattern != DefaultStateGetPattern {
+		t.Fatalf("expected StateGetPattern %q, got %q", DefaultStateGetPattern, got.StateGetPattern)
 	}
 }
 
@@ -286,6 +298,22 @@ func TestBuilderMethodsGenerateExpectedSubjects(t *testing.T) {
 	}
 	if healthSubject != "health.vyos" {
 		t.Fatalf("expected health subject %q, got %q", "health.vyos", healthSubject)
+	}
+
+	stateSubject, err := builder.StateSubject("vyos")
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if stateSubject != "state.vyos" {
+		t.Fatalf("expected state subject %q, got %q", "state.vyos", stateSubject)
+	}
+
+	stateGetSubject, err := builder.StateGetSubject("vyos")
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if stateGetSubject != "state.get.vyos" {
+		t.Fatalf("expected state get subject %q, got %q", "state.get.vyos", stateGetSubject)
 	}
 }
 

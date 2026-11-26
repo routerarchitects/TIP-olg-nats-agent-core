@@ -147,3 +147,26 @@ type HealthSnapshot struct {
 	ActiveSubscriptions     int             `json:"active_subscriptions"`
 	LastError               string          `json:"last_error,omitempty"`
 }
+
+// StateEnvelope represents periodic or on-demand device state telemetry.
+type StateEnvelope struct {
+	Version   string          `json:"version"`
+	Target    string          `json:"target"`
+	UUID      string          `json:"uuid"`
+	Payload   json.RawMessage `json:"payload"`
+	Timestamp time.Time       `json:"timestamp"`
+}
+
+// StateGetReply models the request-reply wire payload returned on the NATS reply inbox for state.get.<target>.
+type StateGetReply struct {
+	Version string             `json:"version"`
+	Target  string             `json:"target"`
+	State   *StateEnvelope     `json:"state,omitempty"`
+	Error   *StateGetWireError `json:"error,omitempty"`
+}
+
+// StateGetWireError models error details transmitted in StateGetReply.
+type StateGetWireError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}

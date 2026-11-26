@@ -1,6 +1,7 @@
 package agentcore
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Telecominfraproject/olg-nats-agent-core/internal/registry"
+	"github.com/Telecominfraproject/olg-nats-agent-core/internal/subjects"
 	"github.com/nats-io/nats.go"
 )
 
@@ -177,6 +179,86 @@ func (c *Client) registerStatusHandler(target string, handler StatusHandler, opt
 
 	if err := c.activateAfterRegistrationLocked(snapshot.ID, "register_status_handler"); err != nil {
 		c.rollbackRegistrationLocked(snapshot.ID, "register_status_handler_rollback")
+		return err
+	}
+	return nil
+}
+
+func (c *Client) registerStateHandler(target string, handler StateHandler, opts ...SubscriptionOption) error {
+	if handler == nil {
+		return validationError("register_state_handler", "state handler is required")
+	}
+	subject, err := c.subjects.StateSubject(target)
+	if err != nil {
+		return toPublicError(err)
+	}
+	subOpts, err := resolveSubscriptionOptions(opts...)
+	if err != nil {
+		return err
+	}
+
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
+
+	snapshot, err := c.subscriptions.Add(registry.AddSpec{
+		Kind:       registry.KindState,
+		Target:     target,
+		Subject:    subject,
+		QueueGroup: subOpts.QueueGroup,
+		Callback:   c.bindStateCallback(handler),
+	})
+	if err != nil {
+		return toPublicError(err)
+	}
+	c.syncSubscriptionHealth()
+
+	c.logDebug("registered state handler", "target", target, "subject", subject, "queue_group", subOpts.QueueGroup, "registration_id", snapshot.ID)
+	if c.options.metrics != nil {
+		c.options.metrics.IncSubscribe(string(registry.KindState), subject, "registered")
+	}
+
+	if err := c.activateAfterRegistrationLocked(snapshot.ID, "register_state_handler"); err != nil {
+		c.rollbackRegistrationLocked(snapshot.ID, "register_state_handler_rollback")
+		return err
+	}
+	return nil
+}
+
+func (c *Client) registerStateGetHandler(target string, handler StateGetHandler, opts ...SubscriptionOption) error {
+	if handler == nil {
+		return validationError("register_state_get_handler", "state get handler is required")
+	}
+	subject, err := c.subjects.StateGetSubject(target)
+	if err != nil {
+		return toPublicError(err)
+	}
+	subOpts, err := resolveSubscriptionOptions(opts...)
+	if err != nil {
+		return err
+	}
+
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
+
+	snapshot, err := c.subscriptions.Add(registry.AddSpec{
+		Kind:       registry.KindStateGet,
+		Target:     target,
+		Subject:    subject,
+		QueueGroup: subOpts.QueueGroup,
+		Callback:   c.bindStateGetCallback(target, handler),
+	})
+	if err != nil {
+		return toPublicError(err)
+	}
+	c.syncSubscriptionHealth()
+
+	c.logDebug("registered state get handler", "target", target, "subject", subject, "queue_group", subOpts.QueueGroup, "registration_id", snapshot.ID)
+	if c.options.metrics != nil {
+		c.options.metrics.IncSubscribe(string(registry.KindStateGet), subject, "registered")
+	}
+
+	if err := c.activateAfterRegistrationLocked(snapshot.ID, "register_state_get_handler"); err != nil {
+		c.rollbackRegistrationLocked(snapshot.ID, "register_state_get_handler_rollback")
 		return err
 	}
 	return nil
@@ -401,6 +483,10 @@ func (c *Client) createSubscriptionForRecord(rec registry.ActivationRecord, op s
 		return c.subscribeResult(rec.Subject, rec.QueueGroup, rec.Callback, flush)
 	case registry.KindStatus:
 		return c.subscribeStatus(rec.Subject, rec.QueueGroup, rec.Callback, flush)
+	case registry.KindState:
+		return c.subscribeState(rec.Subject, rec.QueueGroup, rec.Callback, flush)
+	case registry.KindStateGet:
+		return c.subscribeStateGet(rec.Subject, rec.QueueGroup, rec.Callback, flush)
 	default:
 		return nil, &Error{
 			Code:      CodeValidation,
@@ -569,6 +655,14 @@ func (c *Client) subscribeResult(subject, queueGroup string, callback nats.MsgHa
 
 func (c *Client) subscribeStatus(subject, queueGroup string, callback nats.MsgHandler, flush bool) (*nats.Subscription, error) {
 	return c.subscribeInternal("subscribe_status", string(registry.KindStatus), subject, queueGroup, callback, flush)
+}
+
+func (c *Client) subscribeState(subject, queueGroup string, callback nats.MsgHandler, flush bool) (*nats.Subscription, error) {
+	return c.subscribeInternal("subscribe_state", string(registry.KindState), subject, queueGroup, callback, flush)
+}
+
+func (c *Client) subscribeStateGet(subject, queueGroup string, callback nats.MsgHandler, flush bool) (*nats.Subscription, error) {
+	return c.subscribeInternal("subscribe_state_get", string(registry.KindStateGet), subject, queueGroup, callback, flush)
 }
 
 func (c *Client) subscribeInternal(op, kind, subject, queueGroup string, callback nats.MsgHandler, flush bool) (*nats.Subscription, error) {
@@ -755,6 +849,168 @@ func (c *Client) bindStatusCallback(handler StatusHandler) nats.MsgHandler {
 	}
 }
 
+func (c *Client) bindStateCallback(handler StateHandler) nats.MsgHandler {
+	return func(msg *nats.Msg) {
+		if !c.callbacksEnabled.Load() {
+			return
+		}
+		if msg == nil {
+			c.logWarn("dropping nil state message")
+			if c.options.metrics != nil {
+				c.options.metrics.IncSubscribe(string(registry.KindState), "", "decode_failed")
+			}
+			return
+		}
+		started := time.Now()
+		payload, err := decodeStateEnvelope("decode_state_envelope", msg.Data)
+		if err != nil {
+			c.logWarn("dropping state message after decode/validate failure", "subject", msg.Subject, "error", err)
+			if c.options.metrics != nil {
+				c.options.metrics.IncSubscribe(string(registry.KindState), msg.Subject, "decode_failed")
+			}
+			return
+		}
+		if err := c.callStateHandler(handler, payload); err != nil {
+			c.logError("state handler returned error", "subject", msg.Subject, "error", err)
+			if c.options.metrics != nil {
+				c.options.metrics.IncSubscribe(string(registry.KindState), msg.Subject, "handler_failed")
+			}
+			return
+		}
+		if c.options.metrics != nil {
+			c.options.metrics.ObserveHandlerLatency(string(registry.KindState), msg.Subject, time.Since(started))
+		}
+	}
+}
+
+func (c *Client) bindStateGetCallback(target string, handler StateGetHandler) nats.MsgHandler {
+	return func(msg *nats.Msg) {
+		if !c.callbacksEnabled.Load() {
+			return
+		}
+		if msg == nil {
+			c.logWarn("dropping nil state get message")
+			return
+		}
+		if msg.Reply == "" {
+			c.logWarn("dropping state get message without reply subject", "subject", msg.Subject)
+			return
+		}
+
+		select {
+		case c.stateGetSem <- struct{}{}:
+			// worker slot acquired
+		default:
+			c.logWarn("state get worker pool saturated, replying service_busy", "target", target, "subject", msg.Subject)
+			if c.options.metrics != nil {
+				c.options.metrics.IncSubscribe(string(registry.KindStateGet), msg.Subject, "service_busy")
+			}
+			reply := StateGetReply{
+				Version: "1.0",
+				Target:  target,
+				Error: &StateGetWireError{
+					Code:    CodeServiceBusy,
+					Message: "All state collection workers are occupied",
+				},
+			}
+			if data, err := json.Marshal(reply); err == nil {
+				if nc, err := c.session.Connection(); err == nil {
+					_ = nc.Publish(msg.Reply, data)
+				}
+			}
+			return
+		}
+
+		go func() {
+			defer func() {
+				<-c.stateGetSem
+			}()
+
+			started := time.Now()
+			ctx, cancel := context.WithTimeout(c.handlerContext(), 3*time.Second)
+			defer cancel()
+
+			var env StateEnvelope
+			var handlerErr error
+
+			func() {
+				defer func() {
+					if recovered := recover(); recovered != nil {
+						handlerErr = fmt.Errorf("state get handler panicked: %v", recovered)
+						c.logError("state get handler panicked", "target", target, "error", handlerErr)
+						if c.options.metrics != nil {
+							c.options.metrics.IncSubscribe(string(registry.KindStateGet), msg.Subject, "handler_panic")
+						}
+					}
+				}()
+				env, handlerErr = handler(ctx)
+			}()
+
+			var reply StateGetReply
+			if ctx.Err() == context.DeadlineExceeded {
+				c.logWarn("state collection timed out", "target", target, "subject", msg.Subject)
+				reply = StateGetReply{
+					Version: "1.0",
+					Target:  target,
+					Error: &StateGetWireError{
+						Code:    CodeCollectionTimeout,
+						Message: "state collection exceeded 3s execution deadline",
+					},
+				}
+				if c.options.metrics != nil {
+					c.options.metrics.IncSubscribe(string(registry.KindStateGet), msg.Subject, "timeout")
+				}
+			} else if handlerErr != nil {
+				c.logError("state collection failed", "target", target, "subject", msg.Subject, "error", handlerErr)
+				reply = StateGetReply{
+					Version: "1.0",
+					Target:  target,
+					Error: &StateGetWireError{
+						Code:    CodeCollectionFailed,
+						Message: handlerErr.Error(),
+					},
+				}
+				if c.options.metrics != nil {
+					c.options.metrics.IncSubscribe(string(registry.KindStateGet), msg.Subject, "handler_failed")
+				}
+			} else {
+				if env.Version == "" {
+					env.Version = "1.0"
+				}
+				if env.Target == "" {
+					env.Target = target
+				}
+				if env.Timestamp.IsZero() {
+					env.Timestamp = c.options.now().UTC()
+				}
+				reply = StateGetReply{
+					Version: "1.0",
+					Target:  target,
+					State:   &env,
+				}
+				if c.options.metrics != nil {
+					c.options.metrics.IncSubscribe(string(registry.KindStateGet), msg.Subject, "success")
+					c.options.metrics.ObserveHandlerLatency(string(registry.KindStateGet), msg.Subject, time.Since(started))
+				}
+			}
+
+			data, err := json.Marshal(reply)
+			if err != nil {
+				c.logError("failed to encode state get reply", "target", target, "error", err)
+				return
+			}
+			nc, err := c.session.Connection()
+			if err != nil {
+				c.logError("failed to get connection to publish state get reply", "target", target, "error", err)
+				return
+			}
+			if err := nc.Publish(msg.Reply, data); err != nil {
+				c.logWarn("failed to publish state get reply", "target", target, "reply_subject", msg.Reply, "error", err)
+			}
+		}()
+	}
+}
+
 func (c *Client) callConfigureHandler(handler ConfigureHandler, msg ConfigureNotification) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -815,6 +1071,21 @@ func (c *Client) callStatusHandler(handler StatusHandler, msg StatusEnvelope) (e
 	return handler(c.handlerContext(), msg)
 }
 
+func (c *Client) callStateHandler(handler StateHandler, msg StateEnvelope) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = &Error{
+				Code:      CodeSubscribeFailed,
+				Op:        "dispatch_state_handler",
+				Message:   "state handler panicked",
+				Retryable: false,
+				Err:       fmt.Errorf("panic: %v", recovered),
+			}
+		}
+	}()
+	return handler(c.handlerContext(), msg)
+}
+
 func decodeConfigureNotification(op string, data []byte) (ConfigureNotification, error) {
 	var msg ConfigureNotification
 	if err := decodePayload(op, data, &msg); err != nil {
@@ -857,6 +1128,53 @@ func decodeStatusEnvelope(op string, data []byte) (StatusEnvelope, error) {
 		return StatusEnvelope{}, err
 	}
 	return msg, nil
+}
+
+func decodeStateEnvelope(op string, data []byte) (StateEnvelope, error) {
+	if len(data) > maxStatePayloadSize {
+		return StateEnvelope{}, validationError(op, "payload exceeds 1MB limit")
+	}
+	var msg StateEnvelope
+	if err := decodePayload(op, data, &msg); err != nil {
+		return StateEnvelope{}, err
+	}
+	if err := validateStateEnvelope(op, msg); err != nil {
+		return StateEnvelope{}, err
+	}
+	return msg, nil
+}
+
+func decodeStateGetReply(data []byte) (StateEnvelope, error) {
+	if len(data) == 0 {
+		return StateEnvelope{}, ErrMalformedStateGetReply
+	}
+	var reply StateGetReply
+	if err := json.Unmarshal(data, &reply); err != nil {
+		return StateEnvelope{}, ErrMalformedStateGetReply
+	}
+	if reply.Version != "1.0" || strings.TrimSpace(reply.Target) == "" {
+		return StateEnvelope{}, ErrMalformedStateGetReply
+	}
+	if (reply.State == nil && reply.Error == nil) || (reply.State != nil && reply.Error != nil) {
+		return StateEnvelope{}, ErrMalformedStateGetReply
+	}
+	if reply.Error != nil {
+		if strings.TrimSpace(reply.Error.Code) == "" {
+			return StateEnvelope{}, ErrMalformedStateGetReply
+		}
+		return StateEnvelope{}, &StateGetError{
+			Code:    reply.Error.Code,
+			Message: reply.Error.Message,
+		}
+	}
+	if reply.State == nil {
+		return StateEnvelope{}, ErrMalformedStateGetReply
+	}
+	env := *reply.State
+	if err := validateStateEnvelope("decode_state_get_reply", env); err != nil {
+		return StateEnvelope{}, ErrMalformedStateGetReply
+	}
+	return env, nil
 }
 
 func decodePayload(op string, data []byte, out any) error {
@@ -998,6 +1316,36 @@ func validateStatusEnvelope(op string, msg StatusEnvelope) error {
 		return err
 	}
 	return optionalJSON(op, "payload", msg.Payload)
+}
+
+const maxStatePayloadSize = 1024 * 1024 // 1 MB
+
+func validateStateEnvelope(op string, msg StateEnvelope) error {
+	if err := requiredString(op, "version", msg.Version); err != nil {
+		return err
+	}
+	if msg.Version != "1.0" {
+		return validationError(op, "version must be 1.0")
+	}
+	if err := requiredString(op, "target", msg.Target); err != nil {
+		return err
+	}
+	if err := subjects.ValidateTarget(msg.Target); err != nil {
+		return validationError(op, err.Error())
+	}
+	if err := optionalString(op, "uuid", msg.UUID); err != nil {
+		return err
+	}
+	if err := requiredTimestamp(op, "timestamp", msg.Timestamp); err != nil {
+		return err
+	}
+	if len(msg.Payload) == 0 {
+		return validationError(op, "payload is required")
+	}
+	if len(msg.Payload) > maxStatePayloadSize {
+		return validationError(op, "payload exceeds 1MB limit")
+	}
+	return requiredJSON(op, "payload", msg.Payload)
 }
 
 func resolveSubscriptionOptions(opts ...SubscriptionOption) (SubscriptionOptions, error) {

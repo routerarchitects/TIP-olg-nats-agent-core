@@ -1,9 +1,34 @@
 package agentcore
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // Code identifies a machine-readable public failure category.
 type Code string
+
+const (
+	// CodeServiceBusy indicates all state collection workers are occupied.
+	CodeServiceBusy = "service_busy"
+	// CodeCollectionFailed indicates state collection failed.
+	CodeCollectionFailed = "collection_failed"
+	// CodeCollectionTimeout indicates state collection exceeded execution deadline.
+	CodeCollectionTimeout = "collection_timeout"
+)
+
+// StateGetError represents an application error returned by on-demand state query.
+type StateGetError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+func (e *StateGetError) Error() string {
+	return fmt.Sprintf("state.get: [%s] %s", e.Code, e.Message)
+}
+
+// ErrMalformedStateGetReply indicates that a state.get wire reply is malformed or invalid.
+var ErrMalformedStateGetReply = errors.New("state.get: malformed wire reply")
 
 const (
 	// CodeValidation indicates a transport-level validation failure.

@@ -5,15 +5,16 @@ import "time"
 // Config configures the reusable agentcore library used inside long-running
 // agent processes.
 type Config struct {
-	AgentName string          `json:"agent_name"`
-	Version   string          `json:"version"`
-	NATS      NATSConfig      `json:"nats"`
-	JetStream JetStreamConfig `json:"jetstream"`
-	Subjects  SubjectConfig   `json:"subjects"`
-	KV        KVConfig        `json:"kv"`
-	Timeouts  TimeoutConfig   `json:"timeouts"`
-	Retry     RetryConfig     `json:"retry"`
-	Observe   ObserveConfig   `json:"observe,omitempty"`
+	AgentName       string          `json:"agent_name"`
+	Version         string          `json:"version"`
+	NATS            NATSConfig      `json:"nats"`
+	JetStream       JetStreamConfig `json:"jetstream"`
+	Subjects        SubjectConfig   `json:"subjects"`
+	KV              KVConfig        `json:"kv"`
+	Timeouts        TimeoutConfig   `json:"timeouts"`
+	Retry           RetryConfig     `json:"retry"`
+	Observe         ObserveConfig   `json:"observe,omitempty"`
+	StateGetWorkers int             `json:"state_get_workers,omitempty"`
 }
 
 // NATSConfig contains core NATS connectivity settings.
@@ -58,6 +59,8 @@ type SubjectConfig struct {
 	ResultPattern    string `json:"result_pattern"`
 	StatusPattern    string `json:"status_pattern"`
 	HealthPattern    string `json:"health_pattern"`
+	StatePattern     string `json:"state_pattern"`
+	StateGetPattern  string `json:"state_get_pattern"`
 }
 
 // KVConfig defines desired-configuration storage settings.

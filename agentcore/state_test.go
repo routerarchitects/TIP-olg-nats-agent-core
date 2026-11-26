@@ -1,0 +1,629 @@
+package agentcore
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/Telecominfraproject/olg-nats-agent-core/internal/registry"
+	"github.com/nats-io/nats.go"
+)
+
+func validTestStateEnvelope() StateEnvelope {
+	return StateEnvelope{
+		Version:   "1.0",
+		Target:    "vyos",
+		UUID:      "1793880893",
+		Payload:   json.RawMessage(`{"version":1,"unit":{"uptime":100},"interfaces":[]}`),
+		Timestamp: time.Unix(1700000000, 0).UTC(),
+	}
+}
+
+func TestStateEnvelope_JSONRoundTrip(t *testing.T) {
+	want := validTestStateEnvelope()
+	data, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+
+	var got StateEnvelope
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+
+	if got.Version != want.Version {
+		t.Fatalf("expected Version %q, got %q", want.Version, got.Version)
+	}
+	if got.Target != want.Target {
+		t.Fatalf("expected Target %q, got %q", want.Target, got.Target)
+	}
+	if got.UUID != want.UUID {
+		t.Fatalf("expected UUID %q, got %q", want.UUID, got.UUID)
+	}
+	if string(got.Payload) != string(want.Payload) {
+		t.Fatalf("expected Payload %s, got %s", string(want.Payload), string(got.Payload))
+	}
+	if !got.Timestamp.Equal(want.Timestamp) {
+		t.Fatalf("expected Timestamp %v, got %v", want.Timestamp, got.Timestamp)
+	}
+}
+
+func TestStateGetReply_JSONRoundTrip(t *testing.T) {
+	// Success path
+	env := validTestStateEnvelope()
+	successReply := StateGetReply{
+		Version: "1.0",
+		Target:  "vyos",
+		State:   &env,
+	}
+	data, err := json.Marshal(successReply)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	var gotSuccess StateGetReply
+	if err := json.Unmarshal(data, &gotSuccess); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if gotSuccess.State == nil || gotSuccess.Error != nil {
+		t.Fatalf("expected State present and Error nil, got %+v", gotSuccess)
+	}
+	if gotSuccess.State.Target != "vyos" {
+		t.Fatalf("expected State.Target %q, got %q", "vyos", gotSuccess.State.Target)
+	}
+
+	// Error path
+	errReply := StateGetReply{
+		Version: "1.0",
+		Target:  "vyos",
+		Error: &StateGetWireError{
+			Code:    CodeServiceBusy,
+			Message: "All state collection workers are occupied",
+		},
+	}
+	data, err = json.Marshal(errReply)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	var gotErr StateGetReply
+	if err := json.Unmarshal(data, &gotErr); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if gotErr.Error == nil || gotErr.State != nil {
+		t.Fatalf("expected Error present and State nil, got %+v", gotErr)
+	}
+	if gotErr.Error.Code != CodeServiceBusy {
+		t.Fatalf("expected Code %q, got %q", CodeServiceBusy, gotErr.Error.Code)
+	}
+}
+
+func TestValidateStateEnvelope(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*StateEnvelope)
+		wantErr bool
+		msgPart string
+	}{
+		{
+			name:    "valid envelope",
+			mutate:  func(e *StateEnvelope) {},
+			wantErr: false,
+		},
+		{
+			name: "missing version",
+			mutate: func(e *StateEnvelope) {
+				e.Version = ""
+			},
+			wantErr: true,
+			msgPart: "version is required",
+		},
+		{
+			name: "invalid version",
+			mutate: func(e *StateEnvelope) {
+				e.Version = "2.0"
+			},
+			wantErr: true,
+			msgPart: "version must be 1.0",
+		},
+		{
+			name: "missing target",
+			mutate: func(e *StateEnvelope) {
+				e.Target = ""
+			},
+			wantErr: true,
+			msgPart: "target is required",
+		},
+		{
+			name: "invalid target with space",
+			mutate: func(e *StateEnvelope) {
+				e.Target = "vy os"
+			},
+			wantErr: true,
+			msgPart: "target cannot contain whitespace",
+		},
+		{
+			name: "missing timestamp",
+			mutate: func(e *StateEnvelope) {
+				e.Timestamp = time.Time{}
+			},
+			wantErr: true,
+			msgPart: "timestamp is required",
+		},
+		{
+			name: "empty payload",
+			mutate: func(e *StateEnvelope) {
+				e.Payload = nil
+			},
+			wantErr: true,
+			msgPart: "payload is required",
+		},
+		{
+			name: "invalid JSON payload",
+			mutate: func(e *StateEnvelope) {
+				e.Payload = json.RawMessage(`{invalid`)
+			},
+			wantErr: true,
+			msgPart: "must contain valid JSON",
+		},
+		{
+			name: "oversized payload",
+			mutate: func(e *StateEnvelope) {
+				// > 1MB payload
+				big := make([]byte, maxStatePayloadSize+10)
+				for i := range big {
+					big[i] = ' '
+				}
+				big[0] = '{'
+				big[len(big)-1] = '}'
+				e.Payload = json.RawMessage(big)
+			},
+			wantErr: true,
+			msgPart: "payload exceeds 1MB limit",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := validTestStateEnvelope()
+			tc.mutate(&env)
+			err := validateStateEnvelope("test_op", env)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if tc.msgPart != "" && !strings.Contains(err.Error(), tc.msgPart) {
+					t.Fatalf("expected error containing %q, got %q", tc.msgPart, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("expected nil error, got %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestPublishState_Success(t *testing.T) {
+	client, pub := newSendTestClient(t)
+	env := validTestStateEnvelope()
+
+	err := client.PublishState(context.Background(), env)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	if len(pub.calls) != 1 {
+		t.Fatalf("expected 1 publish call, got %d", len(pub.calls))
+	}
+	call := pub.calls[0]
+	if call.op != "publish_state" {
+		t.Fatalf("expected op %q, got %q", "publish_state", call.op)
+	}
+	if call.kind != string(registry.KindState) {
+		t.Fatalf("expected kind %q, got %q", registry.KindState, call.kind)
+	}
+	if call.subject != "state.vyos" {
+		t.Fatalf("expected subject %q, got %q", "state.vyos", call.subject)
+	}
+
+	var decoded StateEnvelope
+	if err := json.Unmarshal(call.payload, &decoded); err != nil {
+		t.Fatalf("failed to unmarshal published payload: %v", err)
+	}
+	if decoded.Target != "vyos" || decoded.UUID != "1793880893" {
+		t.Fatalf("published payload mismatch: %+v", decoded)
+	}
+}
+
+func TestPublishState_ValidationErrors(t *testing.T) {
+	client, pub := newSendTestClient(t)
+
+	// Missing version
+	env := validTestStateEnvelope()
+	env.Version = ""
+	err := client.PublishState(context.Background(), env)
+	requireErrorCode(t, err, CodeValidation)
+
+	// Cancelled context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = client.PublishState(ctx, validTestStateEnvelope())
+	requireErrorCode(t, err, CodeValidation)
+
+	if len(pub.calls) != 0 {
+		t.Fatalf("expected 0 publish calls on validation failure, got %d", len(pub.calls))
+	}
+}
+
+func TestRegisterStateHandler_RegistrationAndHealth(t *testing.T) {
+	client, err := New(testConfig())
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+
+	err = client.RegisterStateHandler("vyos", func(context.Context, StateEnvelope) error { return nil }, WithQueueGroup("state-workers"))
+	if err != nil {
+		t.Fatalf("expected nil registration error, got %v", err)
+	}
+
+	if client.Health().RegisteredSubscriptions != 1 {
+		t.Fatalf("expected 1 registered subscription, got %d", client.Health().RegisteredSubscriptions)
+	}
+
+	snapshots := client.subscriptions.List()
+	if len(snapshots) != 1 {
+		t.Fatalf("expected 1 subscription snapshot, got %d", len(snapshots))
+	}
+	snap := snapshots[0]
+	if snap.Kind != registry.KindState {
+		t.Fatalf("expected kind %q, got %q", registry.KindState, snap.Kind)
+	}
+	if snap.Subject != "state.vyos" {
+		t.Fatalf("expected subject %q, got %q", "state.vyos", snap.Subject)
+	}
+	if snap.QueueGroup != "state-workers" {
+		t.Fatalf("expected queue group %q, got %q", "state-workers", snap.QueueGroup)
+	}
+}
+
+func TestRegisterStateHandler_CallbackInvocation(t *testing.T) {
+	client, err := New(testConfig())
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+	client.callbacksEnabled.Store(true)
+
+	var received StateEnvelope
+	calls := 0
+	cb := client.bindStateCallback(func(_ context.Context, env StateEnvelope) error {
+		calls++
+		received = env
+		return nil
+	})
+
+	// 1. Valid payload
+	validEnv := validTestStateEnvelope()
+	data, _ := json.Marshal(validEnv)
+	cb(&nats.Msg{Subject: "state.vyos", Data: data})
+
+	if calls != 1 {
+		t.Fatalf("expected 1 callback call, got %d", calls)
+	}
+	if received.Target != "vyos" || received.UUID != "1793880893" {
+		t.Fatalf("received state mismatch: %+v", received)
+	}
+
+	// 2. Oversized payload (> 1MB) dropped without invoking handler
+	calls = 0
+	oversized := make([]byte, maxStatePayloadSize+100)
+	cb(&nats.Msg{Subject: "state.vyos", Data: oversized})
+	if calls != 0 {
+		t.Fatalf("expected oversized payload to be dropped, got %d calls", calls)
+	}
+
+	// 3. Malformed JSON dropped without invoking handler
+	calls = 0
+	cb(&nats.Msg{Subject: "state.vyos", Data: []byte("{invalid-json")})
+	if calls != 0 {
+		t.Fatalf("expected malformed JSON to be dropped, got %d calls", calls)
+	}
+
+	// 4. Nil message dropped safely
+	cb(nil)
+
+	// 5. Handler panic recovered safely
+	panicCB := client.bindStateCallback(func(_ context.Context, env StateEnvelope) error {
+		panic("boom")
+	})
+	panicCB(&nats.Msg{Subject: "state.vyos", Data: data})
+}
+
+func TestRegisterStateGetHandler_Registration(t *testing.T) {
+	client, err := New(testConfig())
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+
+	err = client.RegisterStateGetHandler("vyos", func(context.Context) (StateEnvelope, error) {
+		return validTestStateEnvelope(), nil
+	})
+	if err != nil {
+		t.Fatalf("expected nil registration error, got %v", err)
+	}
+
+	if client.Health().RegisteredSubscriptions != 1 {
+		t.Fatalf("expected 1 registered subscription, got %d", client.Health().RegisteredSubscriptions)
+	}
+
+	snapshots := client.subscriptions.List()
+	if len(snapshots) != 1 {
+		t.Fatalf("expected 1 subscription snapshot, got %d", len(snapshots))
+	}
+	snap := snapshots[0]
+	if snap.Kind != registry.KindStateGet {
+		t.Fatalf("expected kind %q, got %q", registry.KindStateGet, snap.Kind)
+	}
+	if snap.Subject != "state.get.vyos" {
+		t.Fatalf("expected subject %q, got %q", "state.get.vyos", snap.Subject)
+	}
+}
+
+func TestDecodeStateGetReply(t *testing.T) {
+	// 1. Success reply
+	env := validTestStateEnvelope()
+	successReply := StateGetReply{
+		Version: "1.0",
+		Target:  "vyos",
+		State:   &env,
+	}
+	data, _ := json.Marshal(successReply)
+	got, err := decodeStateGetReply(data)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if got.UUID != "1793880893" {
+		t.Fatalf("expected UUID %q, got %q", "1793880893", got.UUID)
+	}
+
+	// 2. ServiceBusy error reply
+	busyReply := StateGetReply{
+		Version: "1.0",
+		Target:  "vyos",
+		Error: &StateGetWireError{
+			Code:    CodeServiceBusy,
+			Message: "All state collection workers are occupied",
+		},
+	}
+	data, _ = json.Marshal(busyReply)
+	_, err = decodeStateGetReply(data)
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	var stateErr *StateGetError
+	if !errors.As(err, &stateErr) {
+		t.Fatalf("expected *StateGetError, got %T: %v", err, err)
+	}
+	if stateErr.Code != CodeServiceBusy {
+		t.Fatalf("expected code %q, got %q", CodeServiceBusy, stateErr.Code)
+	}
+
+	// 3. CollectionTimeout error reply
+	timeoutReply := StateGetReply{
+		Version: "1.0",
+		Target:  "vyos",
+		Error: &StateGetWireError{
+			Code:    CodeCollectionTimeout,
+			Message: "state collection timed out",
+		},
+	}
+	data, _ = json.Marshal(timeoutReply)
+	_, err = decodeStateGetReply(data)
+	if !errors.As(err, &stateErr) || stateErr.Code != CodeCollectionTimeout {
+		t.Fatalf("expected CodeCollectionTimeout, got %v", err)
+	}
+
+	// 4. CollectionFailed error reply
+	failedReply := StateGetReply{
+		Version: "1.0",
+		Target:  "vyos",
+		Error: &StateGetWireError{
+			Code:    CodeCollectionFailed,
+			Message: "kernel counter collection failed",
+		},
+	}
+	data, _ = json.Marshal(failedReply)
+	_, err = decodeStateGetReply(data)
+	if !errors.As(err, &stateErr) || stateErr.Code != CodeCollectionFailed {
+		t.Fatalf("expected CodeCollectionFailed, got %v", err)
+	}
+
+	// 5. Malformed: Dual state and error
+	dualReply := StateGetReply{
+		Version: "1.0",
+		Target:  "vyos",
+		State:   &env,
+		Error: &StateGetWireError{
+			Code:    CodeCollectionFailed,
+			Message: "dual failure",
+		},
+	}
+	data, _ = json.Marshal(dualReply)
+	_, err = decodeStateGetReply(data)
+	if !errors.Is(err, ErrMalformedStateGetReply) {
+		t.Fatalf("expected ErrMalformedStateGetReply for dual reply, got %v", err)
+	}
+
+	// 6. Malformed: Neither state nor error
+	emptyReply := StateGetReply{
+		Version: "1.0",
+		Target:  "vyos",
+	}
+	data, _ = json.Marshal(emptyReply)
+	_, err = decodeStateGetReply(data)
+	if !errors.Is(err, ErrMalformedStateGetReply) {
+		t.Fatalf("expected ErrMalformedStateGetReply for empty reply, got %v", err)
+	}
+
+	// 7. Malformed: Empty raw data
+	_, err = decodeStateGetReply([]byte{})
+	if !errors.Is(err, ErrMalformedStateGetReply) {
+		t.Fatalf("expected ErrMalformedStateGetReply for empty data, got %v", err)
+	}
+
+	// 8. Malformed: Invalid JSON
+	_, err = decodeStateGetReply([]byte(`{invalid`))
+	if !errors.Is(err, ErrMalformedStateGetReply) {
+		t.Fatalf("expected ErrMalformedStateGetReply for invalid JSON, got %v", err)
+	}
+
+	// 9. Malformed: Invalid version
+	wrongVerReply := StateGetReply{
+		Version: "2.0",
+		Target:  "vyos",
+		State:   &env,
+	}
+	data, _ = json.Marshal(wrongVerReply)
+	_, err = decodeStateGetReply(data)
+	if !errors.Is(err, ErrMalformedStateGetReply) {
+		t.Fatalf("expected ErrMalformedStateGetReply for wrong version, got %v", err)
+	}
+}
+
+func TestRequestState_DelegationAndErrors(t *testing.T) {
+	client, err := New(testConfig())
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+
+	// 1. Success via requestStateFn
+	client.requestStateFn = func(_ context.Context, target string) (StateEnvelope, error) {
+		env := validTestStateEnvelope()
+		env.Target = target
+		return env, nil
+	}
+	got, err := client.RequestState(context.Background(), "vyos")
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if got.Target != "vyos" {
+		t.Fatalf("expected target vyos, got %q", got.Target)
+	}
+
+	// 2. Error propagation via requestStateFn
+	client.requestStateFn = func(_ context.Context, _ string) (StateEnvelope, error) {
+		return StateEnvelope{}, &StateGetError{Code: CodeServiceBusy, Message: "busy"}
+	}
+	_, err = client.RequestState(context.Background(), "vyos")
+	var stateErr *StateGetError
+	if !errors.As(err, &stateErr) || stateErr.Code != CodeServiceBusy {
+		t.Fatalf("expected CodeServiceBusy, got %v", err)
+	}
+
+	// 3. Validation: invalid target
+	client.requestStateFn = nil
+	_, err = client.RequestState(context.Background(), "invalid target")
+	requireErrorCode(t, err, CodeValidation)
+
+	// 4. Validation: cancelled context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = client.RequestState(ctx, "vyos")
+	requireErrorCode(t, err, CodeValidation)
+}
+
+func TestRegisterStateGetHandler_Saturation_ServiceBusy(t *testing.T) {
+	// Worker pool capacity is 5.
+	cfg := testConfig()
+	cfg.StateGetWorkers = 5
+	client, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+	client.callbacksEnabled.Store(true)
+
+	// Fill all 5 worker slots
+	for i := 0; i < 5; i++ {
+		client.stateGetSem <- struct{}{}
+	}
+
+	// The 6th request should immediately receive CodeServiceBusy
+	cb := client.bindStateGetCallback("vyos", func(context.Context) (StateEnvelope, error) {
+		return validTestStateEnvelope(), nil
+	})
+
+	// When saturated, the callback attempts to publish to reply subject.
+	// Since there's no real NATS session connected, it returns immediately without blocking.
+	cb(&nats.Msg{
+		Subject: "state.get.vyos",
+		Reply:   "_INBOX.test1234",
+		Data:    nil,
+	})
+
+	// Verify semaphore is still at 5 (all 5 filled)
+	if len(client.stateGetSem) != 5 {
+		t.Fatalf("expected sem length 5, got %d", len(client.stateGetSem))
+	}
+
+	// Drain semaphore
+	for i := 0; i < 5; i++ {
+		<-client.stateGetSem
+	}
+
+	// Verify semaphore is now 0 (all released)
+	if len(client.stateGetSem) != 0 {
+		t.Fatalf("expected sem length 0, got %d", len(client.stateGetSem))
+	}
+}
+
+func TestRegisterStateGetHandler_CapacityRelease_OnSuccess_OnError_OnPanic(t *testing.T) {
+	cfg := testConfig()
+	cfg.StateGetWorkers = 2
+	client, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+	client.callbacksEnabled.Store(true)
+
+	// 1. Success release
+	var wg sync.WaitGroup
+	wg.Add(1)
+	cb := client.bindStateGetCallback("vyos", func(context.Context) (StateEnvelope, error) {
+		defer wg.Done()
+		return validTestStateEnvelope(), nil
+	})
+	cb(&nats.Msg{Subject: "state.get.vyos", Reply: "_INBOX.test", Data: nil})
+	wg.Wait()
+	time.Sleep(20 * time.Millisecond)
+	if len(client.stateGetSem) != 0 {
+		t.Fatalf("expected sem length 0 after success, got %d", len(client.stateGetSem))
+	}
+
+	// 2. Error release
+	wg.Add(1)
+	cbErr := client.bindStateGetCallback("vyos", func(context.Context) (StateEnvelope, error) {
+		defer wg.Done()
+		return StateEnvelope{}, errors.New("collection failed")
+	})
+	cbErr(&nats.Msg{Subject: "state.get.vyos", Reply: "_INBOX.test", Data: nil})
+	wg.Wait()
+	time.Sleep(20 * time.Millisecond)
+	if len(client.stateGetSem) != 0 {
+		t.Fatalf("expected sem length 0 after error, got %d", len(client.stateGetSem))
+	}
+
+	// 3. Panic release
+	wg.Add(1)
+	cbPanic := client.bindStateGetCallback("vyos", func(context.Context) (StateEnvelope, error) {
+		defer wg.Done()
+		panic("crash")
+	})
+	cbPanic(&nats.Msg{Subject: "state.get.vyos", Reply: "_INBOX.test", Data: nil})
+	wg.Wait()
+	time.Sleep(20 * time.Millisecond)
+	if len(client.stateGetSem) != 0 {
+		t.Fatalf("expected sem length 0 after panic, got %d", len(client.stateGetSem))
+	}
+}

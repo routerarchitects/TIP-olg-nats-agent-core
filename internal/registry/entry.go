@@ -10,6 +10,8 @@ const (
 	KindAction    Kind = "action"
 	KindResult    Kind = "result"
 	KindStatus    Kind = "status"
+	KindState     Kind = "state"
+	KindStateGet  Kind = "state_get"
 )
 
 // AddSpec contains subscription intent fields persisted in the registry.

@@ -14,6 +14,7 @@ import (
 	"github.com/Telecominfraproject/olg-nats-agent-core/internal/session"
 	"github.com/Telecominfraproject/olg-nats-agent-core/internal/subjects"
 	"github.com/Telecominfraproject/olg-nats-agent-core/internal/transport"
+	"github.com/nats-io/nats.go"
 )
 
 // ConfigureHandler handles configure notifications for a target.
@@ -27,6 +28,12 @@ type ResultHandler func(context.Context, ResultEnvelope) error
 
 // StatusHandler handles status messages for a target.
 type StatusHandler func(context.Context, StatusEnvelope) error
+
+// StateHandler handles periodic state reports for a target.
+type StateHandler func(context.Context, StateEnvelope) error
+
+// StateGetHandler handles on-demand state queries for a target.
+type StateGetHandler func(context.Context) (StateEnvelope, error)
 
 // DesiredConfigWatchHandler handles desired-config watch updates.
 type DesiredConfigWatchHandler func(context.Context, StoredDesiredConfig) error
@@ -141,6 +148,9 @@ type Client struct {
 
 	callbacksEnabled atomic.Bool
 
+	stateGetSem    chan struct{}
+	requestStateFn func(context.Context, string) (StateEnvelope, error)
+
 	startSessionFn               func(context.Context) error
 	activateAllSubscriptionsFn   func(string) error
 	deactivateAllSubscriptionsFn func(string) error
@@ -186,6 +196,8 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 		ResultPattern:    cfg.Subjects.ResultPattern,
 		StatusPattern:    cfg.Subjects.StatusPattern,
 		HealthPattern:    cfg.Subjects.HealthPattern,
+		StatePattern:     cfg.Subjects.StatePattern,
+		StateGetPattern:  cfg.Subjects.StateGetPattern,
 	})
 	if err != nil {
 		return nil, toPublicError(err)
@@ -227,6 +239,11 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 		return nil, toPublicError(err)
 	}
 
+	stateGetWorkers := cfg.StateGetWorkers
+	if stateGetWorkers <= 0 {
+		stateGetWorkers = 5
+	}
+
 	client := &Client{
 		cfg:           cfg,
 		options:       options,
@@ -236,6 +253,7 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 		subjects:      subjectBuilder,
 		publisher:     publisher,
 		activeWatches: make(map[uint64]*activeWatch),
+		stateGetSem:   make(chan struct{}, stateGetWorkers),
 	}
 	client.syncSubscriptionHealth()
 	runtime.SetReconnectHandler(client.onSessionReconnected)
@@ -555,6 +573,82 @@ func (c *Client) PublishStatus(ctx context.Context, msg StatusEnvelope) error {
 	return nil
 }
 
+// PublishState publishes a state envelope to the target state subject.
+func (c *Client) PublishState(ctx context.Context, msg StateEnvelope) error {
+	const op = "publish_state"
+
+	if err := validateOperationContext(op, ctx); err != nil {
+		return err
+	}
+	if err := validateStateEnvelope(op, msg); err != nil {
+		return err
+	}
+	subject, err := c.subjects.StateSubject(msg.Target)
+	if err != nil {
+		return toPublicError(err)
+	}
+
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		return &Error{
+			Code:      CodeEncodeFailed,
+			Op:        "publish_state_encode",
+			Subject:   subject,
+			Message:   "failed to encode state envelope",
+			Retryable: false,
+			Err:       err,
+		}
+	}
+
+	if err := c.publisher.Publish(ctx, op, string(registry.KindState), subject, payload); err != nil {
+		return toPublicError(err)
+	}
+	return nil
+}
+
+// RequestState sends an on-demand state query to the target and awaits a StateEnvelope reply.
+func (c *Client) RequestState(ctx context.Context, target string) (StateEnvelope, error) {
+	const op = "request_state"
+	if c.requestStateFn != nil {
+		return c.requestStateFn(ctx, target)
+	}
+	if err := validateOperationContext(op, ctx); err != nil {
+		return StateEnvelope{}, err
+	}
+	if err := subjects.ValidateTarget(target); err != nil {
+		return StateEnvelope{}, validationError(op, err.Error())
+	}
+	subject, err := c.subjects.StateGetSubject(target)
+	if err != nil {
+		return StateEnvelope{}, toPublicError(err)
+	}
+
+	nc, err := c.session.Connection()
+	if err != nil {
+		return StateEnvelope{}, toPublicError(err)
+	}
+
+	msg, err := nc.RequestWithContext(ctx, subject, nil)
+	if err != nil {
+		if errors.Is(err, nats.ErrNoResponders) {
+			return StateEnvelope{}, nats.ErrNoResponders
+		}
+		if ctx.Err() != nil {
+			return StateEnvelope{}, ctx.Err()
+		}
+		return StateEnvelope{}, &Error{
+			Code:      CodePublishFailed,
+			Op:        op,
+			Subject:   subject,
+			Message:   "state request failed",
+			Retryable: true,
+			Err:       err,
+		}
+	}
+
+	return decodeStateGetReply(msg.Data)
+}
+
 // StoreDesiredConfig writes desired configuration to JetStream KV.
 func (c *Client) StoreDesiredConfig(ctx context.Context, rec DesiredConfigRecord) (*StoredDesiredConfig, error) {
 	if c.storeDesiredConfigFn != nil {
@@ -676,6 +770,16 @@ func (c *Client) RegisterResultHandler(target string, handler ResultHandler, opt
 // RegisterStatusHandler registers a status handler.
 func (c *Client) RegisterStatusHandler(target string, handler StatusHandler, opts ...SubscriptionOption) error {
 	return c.registerStatusHandler(target, handler, opts...)
+}
+
+// RegisterStateHandler registers a periodic state handler.
+func (c *Client) RegisterStateHandler(target string, handler StateHandler, opts ...SubscriptionOption) error {
+	return c.registerStateHandler(target, handler, opts...)
+}
+
+// RegisterStateGetHandler registers an on-demand live state query handler.
+func (c *Client) RegisterStateGetHandler(target string, handler StateGetHandler, opts ...SubscriptionOption) error {
+	return c.registerStateGetHandler(target, handler, opts...)
 }
 
 func (c *Client) restoreAllActiveWatches() error {
