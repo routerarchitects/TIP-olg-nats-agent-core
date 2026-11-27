@@ -5,14 +5,14 @@ import "time"
 // Config configures the reusable agentcore library used inside long-running
 // agent processes.
 type Config struct {
-	AgentName       string          `json:"agent_name"`
-	Version         string          `json:"version"`
-	NATS            NATSConfig      `json:"nats"`
-	JetStream       JetStreamConfig `json:"jetstream"`
-	Subjects        SubjectConfig   `json:"subjects"`
-	KV              KVConfig        `json:"kv"`
-	Timeouts        TimeoutConfig   `json:"timeouts"`
-	Retry           RetryConfig     `json:"retry"`
+	AgentName        string          `json:"agent_name"`
+	Version          string          `json:"version"`
+	NATS             NATSConfig      `json:"nats"`
+	JetStream        JetStreamConfig `json:"jetstream"`
+	Subjects         SubjectConfig   `json:"subjects"`
+	KV               KVConfig        `json:"kv"`
+	Timeouts         TimeoutConfig   `json:"timeouts"`
+	Retry            RetryConfig     `json:"retry"`
 	Observe          ObserveConfig   `json:"observe,omitempty"`
 	StateGetWorkers  int             `json:"state_get_workers,omitempty"`
 	StateMaxWireSize int             `json:"state_max_wire_size,omitempty"`
