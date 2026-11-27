@@ -15,6 +15,10 @@ const (
 	DefaultStatusPattern = "status.%s"
 	// DefaultHealthPattern is the standard health routing pattern.
 	DefaultHealthPattern = "health.%s"
+	// DefaultStatePattern is the standard state routing pattern.
+	DefaultStatePattern = "state.%s"
+	// DefaultStateGetPattern is the standard state get routing pattern.
+	DefaultStateGetPattern = "state.get.%s"
 )
 
 // Patterns contains all subject patterns used by routing helpers.
@@ -24,6 +28,8 @@ type Patterns struct {
 	ResultPattern    string
 	StatusPattern    string
 	HealthPattern    string
+	StatePattern     string
+	StateGetPattern  string
 }
 
 // Config contains optional subject-pattern overrides.
@@ -33,6 +39,8 @@ type Config struct {
 	ResultPattern    string
 	StatusPattern    string
 	HealthPattern    string
+	StatePattern     string
+	StateGetPattern  string
 }
 
 // DefaultPatterns returns the default routing patterns.
@@ -43,6 +51,8 @@ func DefaultPatterns() Patterns {
 		ResultPattern:    DefaultResultPattern,
 		StatusPattern:    DefaultStatusPattern,
 		HealthPattern:    DefaultHealthPattern,
+		StatePattern:     DefaultStatePattern,
+		StateGetPattern:  DefaultStateGetPattern,
 	}
 }
 
@@ -65,6 +75,12 @@ func PatternsFromConfig(cfg Config) (Patterns, error) {
 	if cfg.HealthPattern != "" {
 		p.HealthPattern = cfg.HealthPattern
 	}
+	if cfg.StatePattern != "" {
+		p.StatePattern = cfg.StatePattern
+	}
+	if cfg.StateGetPattern != "" {
+		p.StateGetPattern = cfg.StateGetPattern
+	}
 
 	if err := validatePattern("configure_pattern", p.ConfigurePattern, 1); err != nil {
 		return Patterns{}, err
@@ -79,6 +95,12 @@ func PatternsFromConfig(cfg Config) (Patterns, error) {
 		return Patterns{}, err
 	}
 	if err := validatePattern("health_pattern", p.HealthPattern, 1); err != nil {
+		return Patterns{}, err
+	}
+	if err := validatePattern("state_pattern", p.StatePattern, 1); err != nil {
+		return Patterns{}, err
+	}
+	if err := validatePattern("state_get_pattern", p.StateGetPattern, 1); err != nil {
 		return Patterns{}, err
 	}
 
@@ -105,6 +127,12 @@ func NewBuilder(patterns Patterns) (*Builder, error) {
 		return nil, err
 	}
 	if err := validatePattern("health_pattern", patterns.HealthPattern, 1); err != nil {
+		return nil, err
+	}
+	if err := validatePattern("state_pattern", patterns.StatePattern, 1); err != nil {
+		return nil, err
+	}
+	if err := validatePattern("state_get_pattern", patterns.StateGetPattern, 1); err != nil {
 		return nil, err
 	}
 
@@ -158,4 +186,20 @@ func (b *Builder) HealthSubject(target string) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf(b.patterns.HealthPattern, target), nil
+}
+
+// StateSubject builds the periodic state subject for a target.
+func (b *Builder) StateSubject(target string) (string, error) {
+	if err := ValidateTarget(target); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(b.patterns.StatePattern, target), nil
+}
+
+// StateGetSubject builds the on-demand state get subject for a target.
+func (b *Builder) StateGetSubject(target string) (string, error) {
+	if err := ValidateTarget(target); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(b.patterns.StateGetPattern, target), nil
 }
