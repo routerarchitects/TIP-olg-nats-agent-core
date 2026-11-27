@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -150,6 +151,7 @@ type Client struct {
 
 	stateGetSem       chan struct{}
 	stateGetTimeout   time.Duration
+	stateMaxPayload   int
 	publishStateReply func(string, []byte)
 	requestStateFn    func(context.Context, string) (StateEnvelope, error)
 
@@ -603,10 +605,31 @@ func (c *Client) PublishState(ctx context.Context, msg StateEnvelope) error {
 		}
 	}
 
+	var nc *nats.Conn
+	if c.session != nil {
+		nc, _ = c.session.Connection()
+	}
+	if limit := c.effectiveStateWireLimit(nc); len(payload) > limit {
+		return validationError(op, fmt.Sprintf("serialized state envelope (%d bytes) exceeds %d-byte wire limit", len(payload), limit))
+	}
+
 	if err := c.publisher.Publish(ctx, op, string(registry.KindState), subject, payload); err != nil {
 		return toPublicError(err)
 	}
 	return nil
+}
+
+func (c *Client) effectiveStateWireLimit(nc *nats.Conn) int {
+	limit := maxStateWireSize
+	if c.stateMaxPayload > 0 && c.stateMaxPayload < limit {
+		limit = c.stateMaxPayload
+	}
+	if nc != nil {
+		if brokerMax := nc.MaxPayload(); brokerMax > 0 && int(brokerMax) < limit {
+			limit = int(brokerMax)
+		}
+	}
+	return limit
 }
 
 // RequestState sends an on-demand state query to the target and awaits a StateEnvelope reply.

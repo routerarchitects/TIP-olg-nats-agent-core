@@ -1035,10 +1035,6 @@ func (c *Client) bindStateGetCallback(target string, handler StateGetHandler) na
 						Target:  target,
 						State:   &env,
 					}
-					if c.options.metrics != nil {
-						c.options.metrics.IncSubscribe(string(registry.KindStateGet), msg.Subject, "success")
-						c.options.metrics.ObserveHandlerLatency(string(registry.KindStateGet), msg.Subject, time.Since(started))
-					}
 				}
 			}
 
@@ -1047,14 +1043,45 @@ func (c *Client) bindStateGetCallback(target string, handler StateGetHandler) na
 				c.logError("failed to encode state get reply", "target", target, "error", err)
 				return
 			}
+
+			var nc *nats.Conn
+			if c.session != nil {
+				nc, _ = c.session.Connection()
+			}
+			if limit := c.effectiveStateWireLimit(nc); reply.State != nil && len(data) > limit {
+				c.logError("state get reply exceeds wire limit", "target", target, "subject", msg.Subject, "size_bytes", len(data), "limit_bytes", limit)
+				reply = StateGetReply{
+					Version: "1.0",
+					Target:  target,
+					Error: &StateGetWireError{
+						Code:    CodeCollectionFailed,
+						Message: fmt.Sprintf("serialized state reply (%d bytes) exceeds %d-byte wire limit", len(data), limit),
+					},
+				}
+				data, err = json.Marshal(reply)
+				if err != nil {
+					c.logError("failed to encode state get size-error reply", "target", target, "error", err)
+					return
+				}
+				if c.options.metrics != nil {
+					c.options.metrics.IncSubscribe(string(registry.KindStateGet), msg.Subject, "handler_failed")
+				}
+			} else if reply.State != nil && c.options.metrics != nil {
+				c.options.metrics.IncSubscribe(string(registry.KindStateGet), msg.Subject, "success")
+				c.options.metrics.ObserveHandlerLatency(string(registry.KindStateGet), msg.Subject, time.Since(started))
+			}
+
 			if c.publishStateReply != nil {
 				c.publishStateReply(msg.Reply, data)
 				return
 			}
-			nc, err := c.session.Connection()
-			if err != nil {
-				c.logError("failed to get connection to publish state get reply", "target", target, "error", err)
-				return
+			if nc == nil {
+				var connErr error
+				nc, connErr = c.session.Connection()
+				if connErr != nil {
+					c.logError("failed to get connection to publish state get reply", "target", target, "error", connErr)
+					return
+				}
 			}
 			if err := nc.Publish(msg.Reply, data); err != nil {
 				c.logWarn("failed to publish state get reply", "target", target, "reply_subject", msg.Reply, "error", err)
@@ -1183,8 +1210,8 @@ func decodeStatusEnvelope(op string, data []byte) (StatusEnvelope, error) {
 }
 
 func decodeStateEnvelope(op string, data []byte) (StateEnvelope, error) {
-	if len(data) > maxStatePayloadSize {
-		return StateEnvelope{}, validationError(op, "payload exceeds 1MB limit")
+	if len(data) > maxStateWireSize {
+		return StateEnvelope{}, validationError(op, "state envelope exceeds 1MB wire limit")
 	}
 	var msg StateEnvelope
 	if err := decodePayload(op, data, &msg); err != nil {
@@ -1197,7 +1224,7 @@ func decodeStateEnvelope(op string, data []byte) (StateEnvelope, error) {
 }
 
 func decodeStateGetReply(data []byte) (StateEnvelope, error) {
-	if len(data) == 0 {
+	if len(data) == 0 || len(data) > maxStateWireSize {
 		return StateEnvelope{}, ErrMalformedStateGetReply
 	}
 	var reply StateGetReply
@@ -1370,7 +1397,16 @@ func validateStatusEnvelope(op string, msg StatusEnvelope) error {
 	return optionalJSON(op, "payload", msg.Payload)
 }
 
-const maxStatePayloadSize = 1024 * 1024 // 1 MB
+// State size contract:
+//   - maxStateWireSize (1 MiB) limits the complete serialized NATS message
+//     (StateEnvelope on state.<target> and StateGetReply on state.get.<target> replies).
+//   - maxStatePayloadSize (1 MiB - 4 KiB) limits the inner StateEnvelope.Payload JSON,
+//     reserving 4 KiB for envelope and reply wrapper overhead so valid payloads fit
+//     within maxStateWireSize and NATS's default 1 MiB max_payload.
+const (
+	maxStateWireSize    = 1024 * 1024 // 1 MiB
+	maxStatePayloadSize = maxStateWireSize - 4096
+)
 
 func validateStateEnvelope(op string, msg StateEnvelope) error {
 	if err := requiredString(op, "version", msg.Version); err != nil {

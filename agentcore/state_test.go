@@ -767,3 +767,97 @@ func TestRegisterStateGetHandler_InvalidEnvelope_ReturnsCollectionFailed(t *test
 		})
 	}
 }
+
+func TestStateSizeLimits_BoundariesAndBrokerLimit(t *testing.T) {
+	// Helper to build valid JSON payload of exact byte length >= 2 (`""`)
+	makePayload := func(size int) json.RawMessage {
+		return json.RawMessage(`"` + strings.Repeat("a", size-2) + `"`)
+	}
+
+	// 1. Periodic validateStateEnvelope & decodeStateEnvelope boundaries
+	envExact := validTestStateEnvelope()
+	envExact.Payload = makePayload(maxStatePayloadSize)
+	if err := validateStateEnvelope("test", envExact); err != nil {
+		t.Fatalf("expected inner payload exactly at maxStatePayloadSize (%d) to pass: %v", maxStatePayloadSize, err)
+	}
+	wireExact, _ := json.Marshal(envExact)
+	if len(wireExact) > maxStateWireSize {
+		t.Fatalf("expected serialized envelope (%d) <= maxStateWireSize (%d)", len(wireExact), maxStateWireSize)
+	}
+	if _, err := decodeStateEnvelope("test", wireExact); err != nil {
+		t.Fatalf("expected decodeStateEnvelope to accept valid envelope at inner payload limit: %v", err)
+	}
+
+	// Inner payload 1 byte over limit
+	envOverInner := validTestStateEnvelope()
+	envOverInner.Payload = makePayload(maxStatePayloadSize + 1)
+	if err := validateStateEnvelope("test", envOverInner); err == nil {
+		t.Fatal("expected inner payload at maxStatePayloadSize+1 to fail validation")
+	}
+
+	// Wire envelope 1 byte over maxStateWireSize
+	oversizedWire := make([]byte, maxStateWireSize+1)
+	if _, err := decodeStateEnvelope("test", oversizedWire); err == nil {
+		t.Fatal("expected decodeStateEnvelope to reject wire message > maxStateWireSize")
+	}
+	if _, err := decodeStateGetReply(oversizedWire); !errors.Is(err, ErrMalformedStateGetReply) {
+		t.Fatalf("expected decodeStateGetReply to reject wire message > maxStateWireSize, got %v", err)
+	}
+
+	// 2. On-demand StateGetReply with inner payload at maxStatePayloadSize fits within maxStateWireSize
+	replyExact := StateGetReply{
+		Version: "1.0",
+		Target:  "vyos",
+		State:   &envExact,
+	}
+	replyWire, _ := json.Marshal(replyExact)
+	if len(replyWire) > maxStateWireSize {
+		t.Fatalf("expected StateGetReply (%d) <= maxStateWireSize (%d)", len(replyWire), maxStateWireSize)
+	}
+	if _, err := decodeStateGetReply(replyWire); err != nil {
+		t.Fatalf("expected decodeStateGetReply to accept reply at inner payload limit: %v", err)
+	}
+
+	// 3. Lower broker max_payload limit: PublishState rejects oversized wire message
+	client, err := New(testConfig())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	client.stateMaxPayload = 1024
+	smallEnv := validTestStateEnvelope()
+	smallEnv.Payload = makePayload(1020) // inner < maxStatePayloadSize, but envelope > 1024 bytes
+	if err := client.PublishState(context.Background(), smallEnv); err == nil {
+		t.Fatal("expected PublishState to reject envelope exceeding effective broker max_payload")
+	}
+
+	// 4. Lower broker max_payload limit: on-demand handler returns small structured CodeCollectionFailed error
+	client.callbacksEnabled.Store(true)
+	bg := context.Background()
+	client.handlerCtx.Store(&bg)
+
+	replyCh := make(chan []byte, 1)
+	client.publishStateReply = func(_ string, data []byte) {
+		replyCh <- data
+	}
+
+	cb := client.bindStateGetCallback("vyos", func(_ context.Context) (StateEnvelope, error) {
+		return smallEnv, nil
+	})
+	cb(&nats.Msg{Subject: "state.get.vyos", Reply: "_INBOX.limit", Data: nil})
+
+	select {
+	case data := <-replyCh:
+		if len(data) > 1024 {
+			t.Fatalf("expected small structured error reply <= 1024 bytes, got %d", len(data))
+		}
+		var reply StateGetReply
+		if err := json.Unmarshal(data, &reply); err != nil {
+			t.Fatalf("unmarshal reply: %v", err)
+		}
+		if reply.State != nil || reply.Error == nil || reply.Error.Code != CodeCollectionFailed {
+			t.Fatalf("expected CodeCollectionFailed error reply, got %+v", reply)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for size-limit error reply")
+	}
+}
