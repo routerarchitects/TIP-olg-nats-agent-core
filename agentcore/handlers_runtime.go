@@ -862,7 +862,7 @@ func (c *Client) bindStateCallback(handler StateHandler) nats.MsgHandler {
 			return
 		}
 		started := time.Now()
-		payload, err := decodeStateEnvelope("decode_state_envelope", msg.Data)
+		payload, err := decodeStateEnvelopeWithLimit("decode_state_envelope", msg.Data, c.stateWireLimitValue(), c.stateInnerPayloadLimit())
 		if err != nil {
 			c.logWarn("dropping state message after decode/validate failure", "subject", msg.Subject, "error", err)
 			if c.options.metrics != nil {
@@ -1013,7 +1013,7 @@ func (c *Client) bindStateGetCallback(target string, handler StateGetHandler) na
 				if env.Timestamp.IsZero() {
 					env.Timestamp = c.options.now().UTC()
 				}
-				if valErr := validateStateEnvelope("state_get", env); valErr != nil || env.Target != target {
+				if valErr := validateStateEnvelopeWithLimit("state_get", env, c.stateInnerPayloadLimit()); valErr != nil || env.Target != target {
 					if valErr == nil {
 						valErr = validationError("state_get", fmt.Sprintf("target %q does not match expected %q", env.Target, target))
 					}
@@ -1210,21 +1210,29 @@ func decodeStatusEnvelope(op string, data []byte) (StatusEnvelope, error) {
 }
 
 func decodeStateEnvelope(op string, data []byte) (StateEnvelope, error) {
-	if len(data) > maxStateWireSize {
-		return StateEnvelope{}, validationError(op, "state envelope exceeds 1MB wire limit")
+	return decodeStateEnvelopeWithLimit(op, data, maxStateWireSize, maxStatePayloadSize)
+}
+
+func decodeStateEnvelopeWithLimit(op string, data []byte, maxWire, maxInner int) (StateEnvelope, error) {
+	if len(data) > maxWire {
+		return StateEnvelope{}, validationError(op, fmt.Sprintf("state envelope exceeds %d-byte wire limit", maxWire))
 	}
 	var msg StateEnvelope
 	if err := decodePayload(op, data, &msg); err != nil {
 		return StateEnvelope{}, err
 	}
-	if err := validateStateEnvelope(op, msg); err != nil {
+	if err := validateStateEnvelopeWithLimit(op, msg, maxInner); err != nil {
 		return StateEnvelope{}, err
 	}
 	return msg, nil
 }
 
 func decodeStateGetReply(data []byte) (StateEnvelope, error) {
-	if len(data) == 0 || len(data) > maxStateWireSize {
+	return decodeStateGetReplyWithLimit(data, maxStateWireSize, maxStatePayloadSize)
+}
+
+func decodeStateGetReplyWithLimit(data []byte, maxWire, maxInner int) (StateEnvelope, error) {
+	if len(data) == 0 || len(data) > maxWire {
 		return StateEnvelope{}, ErrMalformedStateGetReply
 	}
 	var reply StateGetReply
@@ -1250,7 +1258,7 @@ func decodeStateGetReply(data []byte) (StateEnvelope, error) {
 		return StateEnvelope{}, ErrMalformedStateGetReply
 	}
 	env := *reply.State
-	if err := validateStateEnvelope("decode_state_get_reply", env); err != nil {
+	if err := validateStateEnvelopeWithLimit("decode_state_get_reply", env, maxInner); err != nil {
 		return StateEnvelope{}, ErrMalformedStateGetReply
 	}
 	return env, nil
@@ -1404,11 +1412,16 @@ func validateStatusEnvelope(op string, msg StatusEnvelope) error {
 //     reserving 4 KiB for envelope and reply wrapper overhead so valid payloads fit
 //     within maxStateWireSize and NATS's default 1 MiB max_payload.
 const (
-	maxStateWireSize    = 1024 * 1024 // 1 MiB
-	maxStatePayloadSize = maxStateWireSize - 4096
+	stateWrapperOverhead = 4096
+	maxStateWireSize     = 1024 * 1024 // 1 MiB minimum & default
+	maxStatePayloadSize  = maxStateWireSize - stateWrapperOverhead
 )
 
 func validateStateEnvelope(op string, msg StateEnvelope) error {
+	return validateStateEnvelopeWithLimit(op, msg, maxStatePayloadSize)
+}
+
+func validateStateEnvelopeWithLimit(op string, msg StateEnvelope, maxInner int) error {
 	if err := requiredString(op, "version", msg.Version); err != nil {
 		return err
 	}
@@ -1430,8 +1443,8 @@ func validateStateEnvelope(op string, msg StateEnvelope) error {
 	if len(msg.Payload) == 0 {
 		return validationError(op, "payload is required")
 	}
-	if len(msg.Payload) > maxStatePayloadSize {
-		return validationError(op, "payload exceeds 1MB limit")
+	if len(msg.Payload) > maxInner {
+		return validationError(op, fmt.Sprintf("payload exceeds %d-byte limit", maxInner))
 	}
 	return requiredJSON(op, "payload", msg.Payload)
 }

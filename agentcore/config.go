@@ -13,8 +13,9 @@ type Config struct {
 	KV              KVConfig        `json:"kv"`
 	Timeouts        TimeoutConfig   `json:"timeouts"`
 	Retry           RetryConfig     `json:"retry"`
-	Observe         ObserveConfig   `json:"observe,omitempty"`
-	StateGetWorkers int             `json:"state_get_workers,omitempty"`
+	Observe          ObserveConfig   `json:"observe,omitempty"`
+	StateGetWorkers  int             `json:"state_get_workers,omitempty"`
+	StateMaxWireSize int             `json:"state_max_wire_size,omitempty"`
 }
 
 // NATSConfig contains core NATS connectivity settings.

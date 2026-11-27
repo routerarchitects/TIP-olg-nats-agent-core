@@ -181,7 +181,7 @@ func TestValidateStateEnvelope(t *testing.T) {
 				e.Payload = json.RawMessage(big)
 			},
 			wantErr: true,
-			msgPart: "payload exceeds 1MB limit",
+			msgPart: "payload exceeds",
 		},
 	}
 
@@ -859,5 +859,32 @@ func TestStateSizeLimits_BoundariesAndBrokerLimit(t *testing.T) {
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("timed out waiting for size-limit error reply")
+	}
+}
+
+func TestStateSizeLimits_ConfigurableMinimumFloor(t *testing.T) {
+	// 1. Value below 1 MiB minimum clamps to 1 MiB default
+	cfgLow := testConfig()
+	cfgLow.StateMaxWireSize = 512
+	cLow, err := New(cfgLow)
+	if err != nil {
+		t.Fatalf("New(cfgLow): %v", err)
+	}
+	if cLow.stateWireLimitValue() != maxStateWireSize {
+		t.Fatalf("expected wire limit clamped to %d, got %d", maxStateWireSize, cLow.stateWireLimitValue())
+	}
+
+	// 2. Value above 1 MiB increases both wire and inner payload limits
+	cfgHigh := testConfig()
+	cfgHigh.StateMaxWireSize = 2 * 1024 * 1024
+	cHigh, err := New(cfgHigh)
+	if err != nil {
+		t.Fatalf("New(cfgHigh): %v", err)
+	}
+	if cHigh.stateWireLimitValue() != 2*1024*1024 {
+		t.Fatalf("expected 2MiB wire limit, got %d", cHigh.stateWireLimitValue())
+	}
+	if cHigh.stateInnerPayloadLimit() != 2*1024*1024-stateWrapperOverhead {
+		t.Fatalf("expected 2MiB-4KiB inner limit, got %d", cHigh.stateInnerPayloadLimit())
 	}
 }

@@ -151,6 +151,7 @@ type Client struct {
 
 	stateGetSem       chan struct{}
 	stateGetTimeout   time.Duration
+	stateWireLimit    int
 	stateMaxPayload   int
 	publishStateReply func(string, []byte)
 	requestStateFn    func(context.Context, string) (StateEnvelope, error)
@@ -247,6 +248,10 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 	if stateGetWorkers <= 0 {
 		stateGetWorkers = 5
 	}
+	stateWireLimit := cfg.StateMaxWireSize
+	if stateWireLimit < maxStateWireSize {
+		stateWireLimit = maxStateWireSize
+	}
 
 	client := &Client{
 		cfg:             cfg,
@@ -259,6 +264,7 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 		activeWatches:   make(map[uint64]*activeWatch),
 		stateGetSem:     make(chan struct{}, stateGetWorkers),
 		stateGetTimeout: 3 * time.Second,
+		stateWireLimit:  stateWireLimit,
 	}
 	client.syncSubscriptionHealth()
 	runtime.SetReconnectHandler(client.onSessionReconnected)
@@ -585,7 +591,7 @@ func (c *Client) PublishState(ctx context.Context, msg StateEnvelope) error {
 	if err := validateOperationContext(op, ctx); err != nil {
 		return err
 	}
-	if err := validateStateEnvelope(op, msg); err != nil {
+	if err := validateStateEnvelopeWithLimit(op, msg, c.stateInnerPayloadLimit()); err != nil {
 		return err
 	}
 	subject, err := c.subjects.StateSubject(msg.Target)
@@ -619,8 +625,19 @@ func (c *Client) PublishState(ctx context.Context, msg StateEnvelope) error {
 	return nil
 }
 
+func (c *Client) stateWireLimitValue() int {
+	if c != nil && c.stateWireLimit >= maxStateWireSize {
+		return c.stateWireLimit
+	}
+	return maxStateWireSize
+}
+
+func (c *Client) stateInnerPayloadLimit() int {
+	return c.stateWireLimitValue() - stateWrapperOverhead
+}
+
 func (c *Client) effectiveStateWireLimit(nc *nats.Conn) int {
-	limit := maxStateWireSize
+	limit := c.stateWireLimitValue()
 	if c.stateMaxPayload > 0 && c.stateMaxPayload < limit {
 		limit = c.stateMaxPayload
 	}
@@ -672,7 +689,7 @@ func (c *Client) RequestState(ctx context.Context, target string) (StateEnvelope
 		}
 	}
 
-	return decodeStateGetReply(msg.Data)
+	return decodeStateGetReplyWithLimit(msg.Data, c.stateWireLimitValue(), c.stateInnerPayloadLimit())
 }
 
 // StoreDesiredConfig writes desired configuration to JetStream KV.
