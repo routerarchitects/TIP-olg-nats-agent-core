@@ -627,3 +627,143 @@ func TestRegisterStateGetHandler_CapacityRelease_OnSuccess_OnError_OnPanic(t *te
 		t.Fatalf("expected sem length 0 after panic, got %d", len(client.stateGetSem))
 	}
 }
+
+func TestRegisterStateGetHandler_Timeout_PromptsReplyAndRetainsSlot(t *testing.T) {
+	cfg := testConfig()
+	cfg.StateGetWorkers = 2
+	client, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+	client.callbacksEnabled.Store(true)
+	bg := context.Background()
+	client.handlerCtx.Store(&bg)
+	client.stateGetTimeout = 40 * time.Millisecond
+
+	replyCh := make(chan []byte, 1)
+	client.publishStateReply = func(_ string, data []byte) {
+		replyCh <- data
+	}
+
+	release := make(chan struct{})
+	done := make(chan struct{})
+
+	cb := client.bindStateGetCallback("vyos", func(_ context.Context) (StateEnvelope, error) {
+		defer close(done)
+		// Deliberately ignore ctx.Done() to simulate a stuck/blocking system call
+		<-release
+		return validTestStateEnvelope(), nil
+	})
+
+	cb(&nats.Msg{Subject: "state.get.vyos", Reply: "_INBOX.timeout", Data: nil})
+
+	// 1. Timeout reply must be published promptly (~40ms) even while handler is still blocked
+	select {
+	case data := <-replyCh:
+		var reply StateGetReply
+		if err := json.Unmarshal(data, &reply); err != nil {
+			t.Fatalf("unmarshal timeout reply: %v", err)
+		}
+		if reply.Error == nil || reply.Error.Code != CodeCollectionTimeout {
+			t.Fatalf("expected CodeCollectionTimeout, got %+v", reply.Error)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected prompt timeout reply before blocked handler returned")
+	}
+
+	// 2. Worker slot must remain occupied while the underlying handler is still running
+	if len(client.stateGetSem) != 1 {
+		t.Fatalf("expected worker slot retained (len=1) while handler still blocked, got %d", len(client.stateGetSem))
+	}
+
+	// 3. Unblock handler and verify slot is released cleanly
+	close(release)
+	<-done
+	time.Sleep(20 * time.Millisecond)
+	if len(client.stateGetSem) != 0 {
+		t.Fatalf("expected worker slot released (len=0) after handler exit, got %d", len(client.stateGetSem))
+	}
+}
+
+func TestRegisterStateGetHandler_InvalidEnvelope_ReturnsCollectionFailed(t *testing.T) {
+	cases := []struct {
+		name string
+		env  StateEnvelope
+	}{
+		{
+			name: "invalid_version",
+			env: StateEnvelope{
+				Version:   "2.0",
+				Target:    "vyos",
+				Timestamp: time.Now().UTC(),
+				Payload:   json.RawMessage(`{"ok":true}`),
+			},
+		},
+		{
+			name: "mismatched_target",
+			env: StateEnvelope{
+				Version:   "1.0",
+				Target:    "other",
+				Timestamp: time.Now().UTC(),
+				Payload:   json.RawMessage(`{"ok":true}`),
+			},
+		},
+		{
+			name: "missing_payload",
+			env: StateEnvelope{
+				Version:   "1.0",
+				Target:    "vyos",
+				Timestamp: time.Now().UTC(),
+			},
+		},
+		{
+			name: "oversized_payload",
+			env: StateEnvelope{
+				Version:   "1.0",
+				Target:    "vyos",
+				Timestamp: time.Now().UTC(),
+				Payload:   json.RawMessage(`"` + strings.Repeat("a", maxStatePayloadSize+1) + `"`),
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.StateGetWorkers = 2
+			client, err := New(cfg)
+			if err != nil {
+				t.Fatalf("New returned unexpected error: %v", err)
+			}
+			client.callbacksEnabled.Store(true)
+			bg := context.Background()
+			client.handlerCtx.Store(&bg)
+
+			replyCh := make(chan []byte, 1)
+			client.publishStateReply = func(_ string, data []byte) {
+				replyCh <- data
+			}
+
+			cb := client.bindStateGetCallback("vyos", func(_ context.Context) (StateEnvelope, error) {
+				return tc.env, nil
+			})
+			cb(&nats.Msg{Subject: "state.get.vyos", Reply: "_INBOX.invalid", Data: nil})
+
+			select {
+			case data := <-replyCh:
+				var reply StateGetReply
+				if err := json.Unmarshal(data, &reply); err != nil {
+					t.Fatalf("unmarshal reply: %v", err)
+				}
+				if reply.State != nil {
+					t.Fatalf("expected nil State on invalid envelope, got %+v", reply.State)
+				}
+				if reply.Error == nil || reply.Error.Code != CodeCollectionFailed {
+					t.Fatalf("expected CodeCollectionFailed, got %+v", reply.Error)
+				}
+			case <-time.After(500 * time.Millisecond):
+				t.Fatal("timed out waiting for state get error reply")
+			}
+		})
+	}
+}

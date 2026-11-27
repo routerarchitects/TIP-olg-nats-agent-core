@@ -148,8 +148,10 @@ type Client struct {
 
 	callbacksEnabled atomic.Bool
 
-	stateGetSem    chan struct{}
-	requestStateFn func(context.Context, string) (StateEnvelope, error)
+	stateGetSem        chan struct{}
+	stateGetTimeout    time.Duration
+	publishStateReply  func(string, []byte)
+	requestStateFn     func(context.Context, string) (StateEnvelope, error)
 
 	startSessionFn               func(context.Context) error
 	activateAllSubscriptionsFn   func(string) error
@@ -252,8 +254,9 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 		subscriptions: registry.New(),
 		subjects:      subjectBuilder,
 		publisher:     publisher,
-		activeWatches: make(map[uint64]*activeWatch),
-		stateGetSem:   make(chan struct{}, stateGetWorkers),
+		activeWatches:   make(map[uint64]*activeWatch),
+		stateGetSem:     make(chan struct{}, stateGetWorkers),
+		stateGetTimeout: 3 * time.Second,
 	}
 	client.syncSubscriptionHealth()
 	runtime.SetReconnectHandler(client.onSessionReconnected)

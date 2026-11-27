@@ -927,13 +927,22 @@ func (c *Client) bindStateGetCallback(target string, handler StateGetHandler) na
 			}()
 
 			started := time.Now()
-			ctx, cancel := context.WithTimeout(c.handlerContext(), 3*time.Second)
+			timeout := c.stateGetTimeout
+			if timeout <= 0 {
+				timeout = 3 * time.Second
+			}
+			ctx, cancel := context.WithTimeout(c.handlerContext(), timeout)
 			defer cancel()
 
-			var env StateEnvelope
-			var handlerErr error
+			type handlerResult struct {
+				env StateEnvelope
+				err error
+			}
+			done := make(chan handlerResult, 1)
 
-			func() {
+			go func() {
+				var env StateEnvelope
+				var handlerErr error
 				defer func() {
 					if recovered := recover(); recovered != nil {
 						handlerErr = fmt.Errorf("state get handler panicked: %v", recovered)
@@ -942,12 +951,33 @@ func (c *Client) bindStateGetCallback(target string, handler StateGetHandler) na
 							c.options.metrics.IncSubscribe(string(registry.KindStateGet), msg.Subject, "handler_panic")
 						}
 					}
+					done <- handlerResult{env: env, err: handlerErr}
 				}()
 				env, handlerErr = handler(ctx)
 			}()
 
+			var res handlerResult
+			timedOut := false
+			select {
+			case res = <-done:
+			case <-ctx.Done():
+				// Retain the worker slot until the underlying handler terminates
+				// so blocked handlers cannot cause unbounded goroutine creation.
+				defer func() {
+					<-done
+				}()
+				if ctx.Err() == context.DeadlineExceeded {
+					timedOut = true
+				} else {
+					res.err = ctx.Err()
+				}
+			}
+
+			env := res.env
+			handlerErr := res.err
+
 			var reply StateGetReply
-			if ctx.Err() == context.DeadlineExceeded {
+			if timedOut || ctx.Err() == context.DeadlineExceeded {
 				c.logWarn("state collection timed out", "target", target, "subject", msg.Subject)
 				reply = StateGetReply{
 					Version: "1.0",
@@ -983,20 +1013,42 @@ func (c *Client) bindStateGetCallback(target string, handler StateGetHandler) na
 				if env.Timestamp.IsZero() {
 					env.Timestamp = c.options.now().UTC()
 				}
-				reply = StateGetReply{
-					Version: "1.0",
-					Target:  target,
-					State:   &env,
-				}
-				if c.options.metrics != nil {
-					c.options.metrics.IncSubscribe(string(registry.KindStateGet), msg.Subject, "success")
-					c.options.metrics.ObserveHandlerLatency(string(registry.KindStateGet), msg.Subject, time.Since(started))
+				if valErr := validateStateEnvelope("state_get", env); valErr != nil || env.Target != target {
+					if valErr == nil {
+						valErr = validationError("state_get", fmt.Sprintf("target %q does not match expected %q", env.Target, target))
+					}
+					c.logError("state collection returned invalid envelope", "target", target, "subject", msg.Subject, "error", valErr)
+					reply = StateGetReply{
+						Version: "1.0",
+						Target:  target,
+						Error: &StateGetWireError{
+							Code:    CodeCollectionFailed,
+							Message: valErr.Error(),
+						},
+					}
+					if c.options.metrics != nil {
+						c.options.metrics.IncSubscribe(string(registry.KindStateGet), msg.Subject, "handler_failed")
+					}
+				} else {
+					reply = StateGetReply{
+						Version: "1.0",
+						Target:  target,
+						State:   &env,
+					}
+					if c.options.metrics != nil {
+						c.options.metrics.IncSubscribe(string(registry.KindStateGet), msg.Subject, "success")
+						c.options.metrics.ObserveHandlerLatency(string(registry.KindStateGet), msg.Subject, time.Since(started))
+					}
 				}
 			}
 
 			data, err := json.Marshal(reply)
 			if err != nil {
 				c.logError("failed to encode state get reply", "target", target, "error", err)
+				return
+			}
+			if c.publishStateReply != nil {
+				c.publishStateReply(msg.Reply, data)
 				return
 			}
 			nc, err := c.session.Connection()
